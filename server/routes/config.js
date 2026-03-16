@@ -115,7 +115,7 @@ export default async function configRoute(app, { engine }) {
       }
 
       // capabilities.learn_skills → 全局 preferences
-      if (partial.capabilities?.learn_skills) {
+      if (partial.capabilities?.learn_skills !== undefined) {
         engine.setLearnSkills(partial.capabilities.learn_skills);
         delete partial.capabilities.learn_skills;
         if (partial.capabilities && Object.keys(partial.capabilities).length === 0) delete partial.capabilities;

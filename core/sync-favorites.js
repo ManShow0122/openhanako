@@ -211,8 +211,21 @@ export function syncFavoritesToModelsJson(configPath, opts = {}) {
   }
 
   // ── 6. 比较是否有变化 ──
+  // 对旧 modelsJson 做同样的正规化（补 input/name），避免 backfill 造成虚假 diff
+  const normalizedOld = { providers: {} };
+  for (const [pn, pv] of Object.entries(modelsJson.providers || {})) {
+    normalizedOld.providers[pn] = {
+      ...pv,
+      models: (pv.models || []).map(m => {
+        const copy = { ...m };
+        if (!copy.name) copy.name = humanizeName(copy.id);
+        if (!copy.input) copy.input = ["text", "image"];
+        return copy;
+      }),
+    };
+  }
   const newJson = { providers: newProviders };
-  const oldStr = JSON.stringify(modelsJson, null, 4);
+  const oldStr = JSON.stringify(normalizedOld, null, 4);
   const newStr = JSON.stringify(newJson, null, 4);
 
   if (oldStr === newStr) return false;
