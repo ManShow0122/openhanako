@@ -428,8 +428,28 @@ export default async function chatRoute(app, { engine, hub }) {
         return;
       }
 
-      if (msg.type === "prompt" && msg.text) {
-        debugLog()?.log("ws", `user message (${msg.text.length} chars)`);
+      if (msg.type === "prompt" && (msg.text || msg.images?.length)) {
+        // 图片校验：最多 10 张，单张 ≤ 20MB，仅允许常见图片 MIME
+        if (msg.images?.length) {
+          const ALLOWED_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+          const MAX_IMAGES = 10;
+          const MAX_BYTES = 20 * 1024 * 1024; // 20MB base64 ≈ 15MB 原始
+          if (msg.images.length > MAX_IMAGES) {
+            wsSend(ws, { type: "error", message: `最多支持 ${MAX_IMAGES} 张图片` });
+            return;
+          }
+          for (const img of msg.images) {
+            if (!img?.mimeType || !ALLOWED_MIME.has(img.mimeType)) {
+              wsSend(ws, { type: "error", message: `不支持的图片格式: ${img?.mimeType || "unknown"}` });
+              return;
+            }
+            if (img.data && img.data.length > MAX_BYTES) {
+              wsSend(ws, { type: "error", message: "单张图片不得超过 20MB" });
+              return;
+            }
+          }
+        }
+        debugLog()?.log("ws", `user message (${(msg.text || "").length} chars, ${msg.images?.length || 0} images)`);
         // 只检查当前活跃 session 是否在 streaming
         if (engine.isStreaming) {
           wsSend(ws, { type: "error", message: t("error.stillStreaming", { name: engine.agentName }) });
@@ -444,7 +464,7 @@ export default async function chatRoute(app, { engine, hub }) {
           ss.titlePreview = "";
           beginSessionStream(ss);
           broadcast({ type: "status", isStreaming: true });
-          await hub.send(msg.text, msg.images ? { images: msg.images } : undefined);
+          await hub.send(msg.text || "", msg.images ? { images: msg.images } : undefined);
           // prompt 完成时，只有仍在活跃 session 才发 status:false
           if (engine.currentSessionPath === promptSessionPath) {
             broadcast({ type: "status", isStreaming: false });
