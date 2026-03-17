@@ -672,13 +672,13 @@ function createSettingsWindow(tab, theme) {
     },
   });
 
-  // Dev 模式走 Vite dev server，prod 走构建产物，fallback 到源码
-  const isDev = process.argv.includes("--dev");
-  if (isDev && process.env.VITE_DEV_URL) {
+  // VITE_DEV_URL 存在时：连接 Vite HMR dev server（npm run start:vite 模式）
+  // 否则：优先加载 dist-renderer 构建产物（npm run start:dev / electron-dev 模式）
+  if (process.env.VITE_DEV_URL) {
     settingsWindow.loadURL(`${process.env.VITE_DEV_URL}/settings.html`);
   } else {
     const builtSettings = path.join(__dirname, "dist-renderer", "settings.html");
-    if (!isDev && fs.existsSync(builtSettings)) {
+    if (fs.existsSync(builtSettings)) {
       settingsWindow.loadFile(builtSettings);
     } else {
       settingsWindow.loadFile(path.join(__dirname, "src", "settings.html"));
