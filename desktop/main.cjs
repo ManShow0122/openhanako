@@ -503,13 +503,14 @@ function createMainWindow() {
     mainWindow.maximize();
   }
 
-  // Dev 模式走 Vite dev server，prod 走构建产物，fallback 到源码
-  const isDev = process.argv.includes("--dev");
-  if (isDev && process.env.VITE_DEV_URL) {
+  // Dev 模式走 Vite dev server，prod/electron-dev 走构建产物，fallback 到源码
+  // VITE_DEV_URL 存在时：连接 Vite HMR dev server（npm run start:vite 模式）
+  // 否则：优先加载 dist-renderer 构建产物（npm run start:dev / electron-dev 模式）
+  if (process.env.VITE_DEV_URL) {
     mainWindow.loadURL(`${process.env.VITE_DEV_URL}/index.html`);
   } else {
     const builtIndex = path.join(__dirname, "dist-renderer", "index.html");
-    if (!isDev && fs.existsSync(builtIndex)) {
+    if (fs.existsSync(builtIndex)) {
       mainWindow.loadFile(builtIndex);
     } else {
       mainWindow.loadFile(path.join(__dirname, "src", "index.html"));
