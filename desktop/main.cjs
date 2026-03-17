@@ -766,6 +766,8 @@ function createBrowserViewerWindow(opts = {}) {
     if (shouldShow) {
       browserViewerWindow.show();
       browserViewerWindow.focus();
+      // 窗口从隐藏变为可见时重算 bounds（隐藏窗口的 getContentSize 可能不准确）
+      _updateBrowserViewBounds();
       // 窗口复用时也要 focus WebContentsView，否则滚动/键盘不工作
       if (_browserWebView) {
         setTimeout(() => {
@@ -817,6 +819,8 @@ function createBrowserViewerWindow(opts = {}) {
   });
 
   browserViewerWindow.on("resize", () => _updateBrowserViewBounds());
+  // 窗口从隐藏变为可见时重算 bounds（Windows 隐藏窗口的 getContentSize 可能返回错误值）
+  browserViewerWindow.on("show", () => _updateBrowserViewBounds());
 
   // 窗口获得焦点时，将输入焦点转发到 WebContentsView（否则无法滚动/打字）
   browserViewerWindow.on("focus", () => {
@@ -947,12 +951,16 @@ function _updateBrowserViewBounds() {
   const [width, height] = browserViewerWindow.getContentSize();
   // 卡片式布局：四周留边距
   const mx = 8, mt = 4, mb = 8;
-  _browserWebView.setBounds({
+  const bounds = {
     x: mx,
     y: TITLEBAR_HEIGHT + mt,
     width: Math.max(0, width - mx * 2),
     height: Math.max(0, height - TITLEBAR_HEIGHT - mt - mb),
-  });
+  };
+  if (bounds.width === 0 || bounds.height === 0) {
+    console.warn("[browser] bounds 计算为零:", { contentSize: [width, height], bounds, visible: browserViewerWindow.isVisible() });
+  }
+  _browserWebView.setBounds(bounds);
 }
 
 function _notifyViewerUrl(url) {
