@@ -9,7 +9,10 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-process.env.HANA_HOME = join(homedir(), ".hanako-dev");
+// 仅在外部未指定 HANA_HOME 时才使用开发目录，避免覆盖用户的显式设置
+if (!process.env.HANA_HOME) {
+  process.env.HANA_HOME = join(homedir(), ".hanako-dev");
+}
 
 const mode = process.argv[2];
 const extra = process.argv.slice(3);
