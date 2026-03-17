@@ -34,7 +34,8 @@
     "dist:win": "npm run build:renderer && electron-builder --win nsis",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "electron-rebuild -f -w better-sqlite3"
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "sync": "node scripts/sync-upstream.js"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.0",
