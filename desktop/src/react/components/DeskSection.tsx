@@ -805,10 +805,18 @@ function DeskCwdSkillsPanel() {
     <div className={`desk-cwd-panel-wrap${closing ? ' closing' : ''}`}>
       <div
         className={`desk-cwd-panel${dragging ? ' drag-over' : ''}`}
-        onClick={() => console.log('[cwd-skills] CLICK on panel — pointer events work')}
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); if (!dragging) { setDragging(true); console.log('[cwd-skills] dragOver on panel'); } }}
-        onDragLeave={() => { setDragging(false); console.log('[cwd-skills] dragLeave on panel'); }}
-        onDrop={(e) => { console.log('[cwd-skills] DROP on panel!'); handleDrop(e); }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const dir = useStore.getState().deskBasePath;
+          if (dir) {
+            const skillsPath = dir + '/.agents/skills';
+            (window as any).platform?.showInFinder?.(skillsPath);
+          }
+        }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => { handleDrop(e); }}
       >
         {/* 说明文案 + 装饰线 */}
         <div className="desk-cwd-desc-line">
