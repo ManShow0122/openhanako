@@ -47,8 +47,11 @@ function ensureGroup(role: string): HTMLElement {
   if (role === 'assistant') {
     const sa = crState().sessionAgent as { name?: string; avatarUrl?: string; yuan?: string } | null;
     const displayName = sa?.name || (crState().agentName as string);
+    const yuanFallback = sa
+      ? crCtx!.yuanFallbackAvatar(sa.yuan || '')
+      : crCtx!.yuanFallbackAvatar(crState().agentYuan as string);
     const displayAvatar = sa?.avatarUrl
-      || (sa ? crCtx!.yuanFallbackAvatar(sa.yuan || '') : null)
+      || yuanFallback
       || (crState().agentAvatarUrl as string)
       || crCtx!.yuanFallbackAvatar(crState().agentYuan as string);
 
@@ -57,6 +60,7 @@ function ensureGroup(role: string): HTMLElement {
     avatar.src = displayAvatar;
     avatar.alt = displayName;
     avatar.draggable = false;
+    avatar.onerror = () => { avatar.onerror = null; avatar.src = yuanFallback; };
     avatarRow.appendChild(avatar);
 
     const name = document.createElement('span');

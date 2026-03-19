@@ -211,9 +211,20 @@ export class HanaEngine {
 
   async createSession(mgr, cwd, mem) { return this._sessionCoord.createSession(mgr, cwd, mem); }
   async switchSession(p) { return this._sessionCoord.switchSession(p); }
+  /** @deprecated Phase 2: 使用 promptSession(path, text, opts) */
   async prompt(text, opts) { return this._sessionCoord.prompt(text, opts); }
+  /** @deprecated Phase 2: 使用 abortSession(path) */
   async abort() { return this._sessionCoord.abort(); }
+  /** @deprecated Phase 2: 使用 steerSession(path, text) */
   steer(text) { return this._sessionCoord.steer(text); }
+
+  // ── Path 感知 API（Phase 2） ──
+  async promptSession(p, text, opts) { return this._sessionCoord.promptSession(p, text, opts); }
+  steerSession(p, text) { return this._sessionCoord.steerSession(p, text); }
+  async abortSession(p) { return this._sessionCoord.abortSession(p); }
+  get focusSessionPath() { return this._sessionCoord.currentSessionPath; }
+  getMessages(p) { return this._sessionCoord.getSessionByPath(p)?.messages ?? []; }
+
   isBridgeSessionStreaming(key) { return this._bridge?.isSessionStreaming(key) ?? false; }
   async abortBridgeSession(key) { return this._bridge?.abortSession(key) ?? false; }
   steerBridgeSession(key, text) { return this._bridge?.steerSession(key, text) ?? false; }

@@ -160,7 +160,7 @@ function InputAreaInner() {
 
     const _cr = () => (window as any).HanaModules.chatRender;
     _cr().addUserMessage(displayText ?? text);
-    state.ws.send(JSON.stringify({ type: 'prompt', text }));
+    state.ws.send(JSON.stringify({ type: 'prompt', text, sessionPath: state.currentSessionPath }));
     return true;
   }, [pendingNewSession]);
 
@@ -411,7 +411,7 @@ function InputAreaInner() {
       setInputText('');
       clearAttachedFiles();
 
-      const wsMsg: any = { type: 'prompt', text: finalText };
+      const wsMsg: any = { type: 'prompt', text: finalText, sessionPath: state.currentSessionPath };
       if (images.length > 0) wsMsg.images = images;
       state.ws?.send(JSON.stringify(wsMsg));
     } finally {
@@ -431,14 +431,14 @@ function InputAreaInner() {
     window.HanaModules.chatRender.addUserMessage(text, null, null);
 
     setInputText('');
-    state.ws.send(JSON.stringify({ type: 'steer', text }));
+    state.ws.send(JSON.stringify({ type: 'steer', text, sessionPath: state.currentSessionPath }));
   }, [inputText, isStreaming]);
 
   // ── Stop generation ──
   const handleStop = useCallback(() => {
     const state = window.__hanaState;
     if (!isStreaming || !state.ws) return;
-    state.ws.send(JSON.stringify({ type: 'abort' }));
+    state.ws.send(JSON.stringify({ type: 'abort', sessionPath: state.currentSessionPath }));
   }, [isStreaming]);
 
   // ── Key handler ──
@@ -726,30 +726,41 @@ function ContextRing() {
   const tokensK = Math.round(tokens / 1000);
   const windowK = contextWindow != null ? Math.round(contextWindow / 1000) : 0;
 
+  const [hovered, setHovered] = useState(false);
+
   return (
-    <button
-      className={`context-ring${compacting ? ' compacting' : ''}`}
-      data-yuan={yuan}
-      title={`${tokensK}k / ${windowK}k tokens (${Math.round(pct)}%)\n点击压缩上下文`}
-      onClick={handleClick}
-      disabled={compacting}
+    <span className="context-ring-wrap"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle cx={center} cy={center} r={r} fill="none" stroke="var(--ring-bg)" strokeWidth={sw} />
-        <circle
-          cx={center} cy={center} r={r}
-          fill="none"
-          stroke="var(--ring-fg)"
-          strokeWidth={sw}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-          transform={`rotate(-90 ${center} ${center})`}
-          className="context-ring-progress"
-        />
-      </svg>
-      <span className="context-ring-label">{tokensK}k</span>
-    </button>
+      <button
+        className={`context-ring${compacting ? ' compacting' : ''}`}
+        data-yuan={yuan}
+        onClick={handleClick}
+        disabled={compacting}
+      >
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <circle cx={center} cy={center} r={r} fill="none" stroke="var(--ring-bg)" strokeWidth={sw} />
+          <circle
+            cx={center} cy={center} r={r}
+            fill="none"
+            stroke="var(--ring-fg)"
+            strokeWidth={sw}
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+            transform={`rotate(-90 ${center} ${center})`}
+            className="context-ring-progress"
+          />
+        </svg>
+      </button>
+      {hovered && (
+        <div className="context-ring-tooltip">
+          <div className="context-ring-tooltip-row">上下文 {windowK}k</div>
+          <div className="context-ring-tooltip-row">已用 {tokensK}k ({Math.round(pct)}%)</div>
+        </div>
+      )}
+    </span>
   );
 }
 

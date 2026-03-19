@@ -198,6 +198,11 @@ export class AgentManager {
     if (userName) {
       config = config.replace(/user:\s*\n\s+name:\s*""/, `user:\n  name: "${userName}"`);
     }
+    // 继承主 agent 的模型配置
+    const primaryChat = currentAgent?.config?.models?.chat || this._d.getModels().defaultModel?.id || "";
+    if (primaryChat) {
+      config = config.replace(/chat: ""/, `chat: "${primaryChat}"`);
+    }
     fs.writeFileSync(path.join(agentDir, "config.yaml"), config, "utf-8");
 
     // identity.md
@@ -259,7 +264,7 @@ export class AgentManager {
     try {
       const hub = this._d.getHub();
       await hub?.pauseForAgentSwitch();
-      await this._d.getSessionCoordinator().cleanupSession();
+      // Phase 1: 不再杀 session，只切 agent 指针
       clearConfigCache();
       this._activeAgentId = agentId;
 

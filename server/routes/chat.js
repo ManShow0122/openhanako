@@ -113,9 +113,13 @@ export default async function chatRoute(app, { engine, hub }) {
     if (_browserThumbTimer) { clearInterval(_browserThumbTimer); _browserThumbTimer = null; }
   }
 
+  // 元数据事件：非焦点 session 也广播（前端需要维护 streamingSessions）
+  const META_EVENT_TYPES = new Set(["turn_end", "status"]);
+
   function emitStreamEvent(sessionPath, ss, event) {
     const entry = appendSessionStreamEvent(ss, event);
-    if (sessionPath === engine.currentSessionPath) {
+    // 内容事件只广播焦点 session，元数据事件始终广播（Phase 4 多标签页时放开全部）
+    if (sessionPath === engine.currentSessionPath || META_EVENT_TYPES.has(event.type)) {
       broadcast({
         ...event,
         sessionPath,
@@ -447,15 +451,17 @@ export default async function chatRoute(app, { engine, hub }) {
       if (!msg) return;
 
       if (msg.type === "abort") {
-        if (engine.isStreaming) {
-          try { await hub.abort(); } catch {}
+        const abortPath = msg.sessionPath || engine.currentSessionPath;
+        if (engine.isSessionStreaming(abortPath)) {
+          try { await hub.abort(abortPath); } catch {}
         }
         return;
       }
 
       if (msg.type === "steer" && msg.text) {
         debugLog()?.log("ws", `steer (${msg.text.length} chars)`);
-        if (engine.steer(msg.text)) {
+        const steerPath = msg.sessionPath || engine.currentSessionPath;
+        if (engine.steerSession(steerPath, msg.text)) {
           wsSend(ws, { type: "steered" });
           return;
         }
@@ -576,12 +582,12 @@ export default async function chatRoute(app, { engine, hub }) {
           promptText = "（看图）";
         }
         debugLog()?.log("ws", `user message (${promptText.length} chars, ${msg.images?.length || 0} images)`);
-        // 只检查当前活跃 session 是否在 streaming
-        if (engine.isStreaming) {
+        // Phase 2: 客户端可指定 sessionPath，否则用焦点 session
+        const promptSessionPath = msg.sessionPath || engine.currentSessionPath;
+        if (engine.isSessionStreaming(promptSessionPath)) {
           wsSend(ws, { type: "error", message: t("error.stillStreaming", { name: engine.agentName }) });
           return;
         }
-        const promptSessionPath = engine.currentSessionPath;
         const ss = getState(promptSessionPath);
         try {
           ss.thinkTagParser.reset();
@@ -590,19 +596,14 @@ export default async function chatRoute(app, { engine, hub }) {
           ss.titleRequested = false;
           ss.titlePreview = "";
           beginSessionStream(ss);
-          broadcast({ type: "status", isStreaming: true });
-          await hub.send(promptText, msg.images ? { images: msg.images } : undefined);
-          // prompt 完成时，只有仍在活跃 session 才发 status:false
-          if (engine.currentSessionPath === promptSessionPath) {
-            broadcast({ type: "status", isStreaming: false });
-          }
+          broadcast({ type: "status", isStreaming: true, sessionPath: promptSessionPath });
+          await hub.send(promptText, msg.images ? { images: msg.images, sessionPath: promptSessionPath } : { sessionPath: promptSessionPath });
+          broadcast({ type: "status", isStreaming: false, sessionPath: promptSessionPath });
         } catch (err) {
           if (!err.message?.includes("aborted")) {
             wsSend(ws, { type: "error", message: err.message });
           }
-          if (engine.currentSessionPath === promptSessionPath) {
-            broadcast({ type: "status", isStreaming: false });
-          }
+          broadcast({ type: "status", isStreaming: false, sessionPath: promptSessionPath });
         }
       }
     });

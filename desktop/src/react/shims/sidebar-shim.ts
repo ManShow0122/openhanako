@@ -75,6 +75,11 @@ async function switchSession(path: string): Promise<void> {
     state().memoryEnabled = data.memoryEnabled !== false;
 
     state().isStreaming = !!data.isStreaming;
+    // 同步 streamingSessions：切入的 session 可能正在 streaming
+    if (data.isStreaming && path) {
+      const list: string[] = state().streamingSessions || [];
+      if (!list.includes(path)) state().streamingSessions = [...list, path];
+    }
 
     if (data.agentId && data.agentId !== state().currentAgentId) {
       const ag = state().agents.find((a: any) => a.id === data.agentId);

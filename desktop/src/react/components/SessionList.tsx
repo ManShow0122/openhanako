@@ -82,6 +82,7 @@ function SessionListInner() {
   const currentSessionPath = useStore(s => s.currentSessionPath);
   const pendingNewSession = useStore(s => s.pendingNewSession);
   const agents = useStore(s => s.agents);
+  const streamingSessions = useStore(s => s.streamingSessions);
 
   const [browserSessions, setBrowserSessions] = useState<Record<string, string>>({});
 
@@ -110,6 +111,7 @@ function SessionListInner() {
               key={s.path}
               session={s}
               isActive={!pendingNewSession && s.path === currentSessionPath}
+              isStreaming={streamingSessions.includes(s.path)}
               agents={agents}
               browserUrl={browserSessions[s.path] || null}
             />
@@ -122,9 +124,10 @@ function SessionListInner() {
 
 // ── Session Item ──
 
-function SessionItem({ session: s, isActive, agents, browserUrl }: {
+function SessionItem({ session: s, isActive, isStreaming, agents, browserUrl }: {
   session: Session;
   isActive: boolean;
+  isStreaming: boolean;
   agents: Agent[];
   browserUrl: string | null;
 }) {
@@ -161,6 +164,7 @@ function SessionItem({ session: s, isActive, agents, browserUrl }: {
         {s.agentId && (
           <AgentBadge agentId={s.agentId} agentName={s.agentName} agents={agents} />
         )}
+        {isStreaming && <span className="session-streaming-dot" />}
         <div className="session-item-title">
           {s.title || s.firstMessage || t('session.untitled')}
         </div>
@@ -198,14 +202,14 @@ function AgentBadge({ agentId, agentName, agents }: {
   agentName: string | null;
   agents: Agent[];
 }) {
-  const [src, setSrc] = useState(() =>
+  const [apiUrl] = useState(() =>
     hanaUrl(`/api/agents/${agentId}/avatar?t=${Date.now()}`),
   );
+  const [errored, setErrored] = useState(false);
 
-  const handleError = useCallback(() => {
-    const agent = agents.find(a => a.id === agentId);
-    setSrc(yuanFallbackAvatar(agent?.yuan));
-  }, [agentId, agents]);
+  // errored 后 src 从当前 agents prop 派生，agents 更新时自动跟随
+  const agent = agents.find(a => a.id === agentId);
+  const src = errored ? yuanFallbackAvatar(agent?.yuan) : apiUrl;
 
   return (
     <img
@@ -213,7 +217,7 @@ function AgentBadge({ agentId, agentName, agents }: {
       src={src}
       title={agentName || agentId}
       draggable={false}
-      onError={handleError}
+      onError={() => setErrored(true)}
     />
   );
 }

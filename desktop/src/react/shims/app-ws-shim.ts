@@ -291,6 +291,11 @@ function handleServerMessage(msg: any): void {
     updateSessionStreamMeta(msg);
   }
 
+  // Phase 1: 非焦点 session 的 stream 事件只更新元数据，不写 DOM
+  if (isStreamScopedMessage(msg) && msg.sessionPath !== state.currentSessionPath) {
+    return;
+  }
+
   switch (msg.type) {
     case 'stream_resume':
       replayStreamResume(msg);
@@ -559,9 +564,23 @@ function handleServerMessage(msg: any): void {
       showError(msg.message);
       break;
 
-    case 'status':
-      applyStreamingStatus(msg.isStreaming);
+    case 'status': {
+      // 元数据层：维护所有 session 的 streaming 状态
+      const sp = msg.sessionPath;
+      if (sp) {
+        const list: string[] = state.streamingSessions || [];
+        if (msg.isStreaming) {
+          if (!list.includes(sp)) state.streamingSessions = [...list, sp];
+        } else {
+          state.streamingSessions = list.filter((p: string) => p !== sp);
+        }
+      }
+      // 渲染层：只有焦点 session 才影响 UI
+      if (!sp || sp === state.currentSessionPath) {
+        applyStreamingStatus(msg.isStreaming);
+      }
       break;
+    }
   }
 }
 

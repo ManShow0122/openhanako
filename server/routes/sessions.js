@@ -64,8 +64,8 @@ function extractTextContent(content, { stripThink = false } = {}) {
  * engine.messages 可能只是当前上下文窗口，切回页面时会导致旧消息缺失。
  * 读文件失败时再退回内存态，避免历史接口直接空白。
  */
-async function loadSessionHistoryMessages(engine) {
-  const sessionPath = engine.currentSessionPath;
+async function loadSessionHistoryMessages(engine, explicitPath) {
+  const sessionPath = explicitPath || engine.currentSessionPath;
   if (sessionPath) {
     try {
       const raw = await fs.readFile(sessionPath, "utf-8");
@@ -124,10 +124,15 @@ export default async function sessionsRoute(app, { engine }) {
     }
   });
 
-  // 获取当前 session 的消息
+  // 获取 session 的消息（支持 ?path= 指定 session，否则读焦点 session）
   app.get("/api/sessions/messages", async (req, reply) => {
     try {
-      const sourceMessages = await loadSessionHistoryMessages(engine);
+      const queryPath = req.query?.path || null;
+      if (queryPath && !isValidSessionPath(queryPath, engine.agentsDir)) {
+        reply.code(403);
+        return { error: "Invalid session path" };
+      }
+      const sourceMessages = await loadSessionHistoryMessages(engine, queryPath);
 
       // 提取可显示的消息（user/assistant 文本 + 文件/artifact 工具结果）
       const messages = [];
