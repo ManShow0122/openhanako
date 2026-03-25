@@ -16,6 +16,7 @@ import {
   loadModelsRegistry,
   resolveApiKeyFromAuth,
 } from "../lib/memory/config-loader.js";
+import { findModel } from "../shared/model-ref.js";
 
 const log = createModuleLogger("config");
 
@@ -238,9 +239,9 @@ export class ConfigCoordinator {
     return synced;
   }
 
-  async setModel(modelId) {
+  async setModel(modelId, provider) {
     const models = this._d.getModels();
-    const model = models.setModel(modelId);
+    const model = models.setModel(modelId, provider);
     const session = this._d.getSession();
     if (session) {
       await session.setModel(model);
@@ -323,7 +324,8 @@ export class ConfigCoordinator {
 
     // 切换聊天模型：不需要 sync，模型早已注册
     if (partial.models?.chat) {
-      const newModel = models.availableModels.find(m => m.id === partial.models.chat);
+      const chatProvider = partial.api?.provider || undefined;
+      const newModel = findModel(models.availableModels, partial.models.chat, chatProvider);
       if (newModel) {
         models.defaultModel = newModel;
         models.currentModel = newModel;
@@ -539,7 +541,7 @@ export class ConfigCoordinator {
     const shared = this.getSharedModels();
     const utilityModelId = shared.utility || this._d.getAgent()?.config?.models?.utility || "";
     const utilityEntry = utilityModelId
-      ? this._d.getModels().availableModels.find((m) => m.id === utilityModelId)
+      ? findModel(this._d.getModels().availableModels, utilityModelId)
       : null;
 
     let reason = "";

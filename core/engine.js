@@ -16,6 +16,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { migrateConfigScope } from "../shared/migrate-config-scope.js";
+import { findModel } from "../shared/model-ref.js";
 import {
   DefaultResourceLoader,
   codingTools,
@@ -279,7 +280,7 @@ export class HanaEngine {
   readAgentOrder() { return this._configCoord.readAgentOrder(); }
   saveAgentOrder(o) { return this._configCoord.saveAgentOrder(o); }
   async syncModelsAndRefresh(f) { return this._configCoord.syncModelsAndRefresh(f); }
-  async setModel(id) { return this._configCoord.setModel(id); }
+  async setModel(id, provider) { return this._configCoord.setModel(id, provider); }
   getThinkingLevel() { return this._configCoord.getThinkingLevel(); }
   setThinkingLevel(l) { return this._configCoord.setThinkingLevel(l); }
   getSandbox() { return this._prefs.getSandbox(); }
@@ -503,7 +504,7 @@ export class HanaEngine {
         console.warn("[engine] ⚠ 未配置 models.chat，defaultModel 为 null");
         this._models.defaultModel = null;
       } else {
-        const model = availableModels.find(m => m.id === preferredId);
+        const model = findModel(availableModels, preferredId);
         if (!model) {
           console.error(`[engine] ⚠ 配置的模型 "${preferredId}" 不在可用列表中，defaultModel 为 null`);
           this._models.defaultModel = null;

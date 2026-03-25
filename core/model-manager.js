@@ -22,6 +22,7 @@ import { ProviderRegistry } from "./provider-registry.js";
 import { AuthStore } from "./auth-store.js";
 import { ExecutionRouter } from "./execution-router.js";
 import { fromRoot } from "../shared/hana-root.js";
+import { findModel } from "../shared/model-ref.js";
 import { syncFavoritesToModelsJson } from "./sync-favorites.js";
 
 const _knownModels = JSON.parse(readFileSync(fromRoot("lib", "known-models.json"), "utf-8"));
@@ -124,7 +125,7 @@ export class ModelManager {
     // 覆盖两种情况：
     //   a) 纯裸 ID（如 "qwen3.5-flash"）
     //   b) OpenRouter 风格 ID（如 "anthropic/claude-opus-4-6" 是 id 本身）
-    return this._availableModels.find(m => m.id === str || m.name === str) || null;
+    return findModel(this._availableModels, str) || this._availableModels.find(m => m.name === str) || null;
   }
 
   // ── 增强管线 ──
@@ -291,8 +292,8 @@ export class ModelManager {
    * 切换当前模型（只改状态，不推到 session）
    * @returns {object} 新模型对象
    */
-  setModel(modelId) {
-    const model = this._availableModels.find(m => m.id === modelId);
+  setModel(modelId, provider) {
+    const model = findModel(this._availableModels, modelId, provider);
     if (!model) throw new Error(t("error.modelNotFound", { id: modelId }));
     this._sessionModel = model;
     return model;
