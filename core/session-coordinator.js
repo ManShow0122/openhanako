@@ -152,6 +152,7 @@ export class SessionCoordinator {
       agentId: this._d.getActiveAgentId(),
       memoryEnabled,
       planMode: initialPlanMode,
+      modelId: models.currentModel?.id || null,
       lastTouchedAt: Date.now(),
       unsub,
     });
@@ -332,6 +333,21 @@ export class SessionCoordinator {
 
     this._d.emitEvent({ type: "plan_mode", enabled: entry.planMode }, sp);
     this._d.emitDevLog(`Plan Mode: ${entry.planMode ? "ON (只读)" : "OFF (正常)"}`, "info");
+  }
+
+  /** 更新当前焦点 session 的 modelId 快照 */
+  updateCurrentSessionModelId(modelId) {
+    const sp = this.currentSessionPath;
+    if (!sp) return;
+    const entry = this._sessions.get(sp);
+    if (entry) entry.modelId = modelId;
+  }
+
+  /** 获取当前焦点 session 的 modelId 快照 */
+  getCurrentSessionModelId() {
+    const sp = this.currentSessionPath;
+    if (!sp) return null;
+    return this._sessions.get(sp)?.modelId || null;
   }
 
   /** 中断所有正在 streaming 的 session */
