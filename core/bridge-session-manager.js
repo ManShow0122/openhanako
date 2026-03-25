@@ -152,11 +152,13 @@ export class BridgeSessionManager {
         tempResourceLoader.getSkills = () => ({ skills: [], diagnostics: [] });
 
         // 使用 agent 配置的模型，而非 defaultModel
-        const chatModelId = agent.config?.models?.chat;
+        const chatRef = agent.config?.models?.chat;
+        const chatModelId = typeof chatRef === "object" ? chatRef?.id : chatRef;
+        const chatProvider = typeof chatRef === "object" ? chatRef?.provider : undefined;
         if (!chatModelId) {
           throw new Error(t("error.bridgeAgentNoChatModel", { name: agent.agentName }));
         }
-        const chatModel = findModel(mm.availableModels, chatModelId);
+        const chatModel = findModel(mm.availableModels, chatModelId, chatProvider);
         if (!chatModel) {
           throw new Error(t("error.bridgeAgentModelNotAvailable", { name: agent.agentName, model: chatModelId }));
         }
@@ -183,11 +185,13 @@ export class BridgeSessionManager {
           : baseCustomTools;
 
         // 使用 agent 配置的模型
-        const ownerModelId = agent.config?.models?.chat;
+        const ownerRef = agent.config?.models?.chat;
+        const ownerModelId = typeof ownerRef === "object" ? ownerRef?.id : ownerRef;
+        const ownerProvider = typeof ownerRef === "object" ? ownerRef?.provider : undefined;
         if (!ownerModelId) {
           throw new Error(t("error.bridgeAgentNoChatModel", { name: agent.agentName }));
         }
-        const ownerModel = findModel(mm.availableModels, ownerModelId);
+        const ownerModel = findModel(mm.availableModels, ownerModelId, ownerProvider);
         if (!ownerModel) {
           throw new Error(t("error.bridgeAgentModelNotAvailable", { name: agent.agentName, model: ownerModelId }));
         }

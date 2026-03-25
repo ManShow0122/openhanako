@@ -293,10 +293,12 @@ export class AgentManager {
       clearConfigCache();
       this._activeAgentId = agentId;
 
-      const preferredId = this.agent.config.models?.chat;
+      const chatRef = this.agent.config.models?.chat;
+      const preferredId = typeof chatRef === "object" ? chatRef?.id : chatRef;
+      const preferredProvider = typeof chatRef === "object" ? chatRef?.provider : undefined;
       const models = this._d.getModels();
       if (preferredId) {
-        const model = findModel(models.availableModels, preferredId);
+        const model = findModel(models.availableModels, preferredId, preferredProvider);
         if (!model) {
           throw new Error(t("error.agentModelNotAvailable", { id: agentId, model: preferredId }));
         }

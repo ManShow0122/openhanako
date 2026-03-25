@@ -194,13 +194,19 @@ export class SessionCoordinator {
 
     // 从 session-meta.json 恢复记忆开关 & 模型
     let memoryEnabled = true;
-    let savedModelId = null;
+    let savedModelRef = null;  // {id, provider} or null
     try {
       const metaPath = path.join(this._d.getAgent().sessionDir, "session-meta.json");
       const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
       const sessKey = path.basename(sessionPath);
-      if (meta[sessKey]?.memoryEnabled === false) memoryEnabled = false;
-      if (meta[sessKey]?.modelId) savedModelId = meta[sessKey].modelId;
+      const metaEntry = meta[sessKey];
+      if (metaEntry?.memoryEnabled === false) memoryEnabled = false;
+      // 读取新格式 model:{id,provider} 或旧格式 modelId
+      if (metaEntry?.model && typeof metaEntry.model === "object") {
+        savedModelRef = metaEntry.model;
+      } else if (metaEntry?.modelId) {
+        savedModelRef = { id: metaEntry.modelId, provider: "" };
+      }
     } catch (err) {
       if (err.code !== "ENOENT") {
         log.warn(`session-meta.json 读取失败: ${err.message}`);
@@ -224,7 +230,9 @@ export class SessionCoordinator {
       if (existing.modelId) {
         try {
           const models = this._d.getModels();
-          const model = models.setModel(existing.modelId);
+          // 从活跃 session 的实际模型对象获取 provider（比 entry 快照更准确）
+          const entryProvider = existing.session?.model?.provider || undefined;
+          const model = models.setModel(existing.modelId, entryProvider);
           await existing.session.setModel(model);
         } catch (err) {
           log.warn(`session model restore failed (${existing.modelId}): ${err.message}`);
@@ -245,13 +253,13 @@ export class SessionCoordinator {
       }
     }
     // 冷启动恢复：先保存当前模型，尝试恢复快照模型，失败时回退
-    if (savedModelId) {
+    if (savedModelRef) {
       const models = this._d.getModels();
       const prevModel = models.currentModel;
       try {
-        models.setModel(savedModelId);
+        models.setModel(savedModelRef.id, savedModelRef.provider || undefined);
       } catch (err) {
-        log.warn(`cold-start model restore failed (${savedModelId}): ${err.message}`);
+        log.warn(`cold-start model restore failed (${savedModelRef.id}): ${err.message}`);
         if (prevModel) models.currentModel = prevModel;
       }
     }
@@ -374,6 +382,20 @@ export class SessionCoordinator {
     return this._sessions.get(sp)?.modelId || null;
   }
 
+  /** 获取当前焦点 session 的完整模型引用 {id, provider} */
+  getCurrentSessionModelRef() {
+    const sp = this.currentSessionPath;
+    if (!sp) return null;
+    const entry = this._sessions.get(sp);
+    if (!entry) return null;
+    // 从活跃 session 的实际模型对象获取
+    if (this._session?.model) {
+      return { id: this._session.model.id, provider: this._session.model.provider };
+    }
+    // fallback: 从 entry 的 modelId 字段（旧格式，无 provider）
+    return entry.modelId ? { id: entry.modelId, provider: "" } : null;
+  }
+
   /** 中断所有正在 streaming 的 session */
   async abortAllStreaming() {
     const tasks = [];
@@ -458,7 +480,13 @@ export class SessionCoordinator {
           s.agentId = agent.id;
           s.agentName = agent.name;
           const sessKey = path.basename(s.path);
-          s.modelId = meta[sessKey]?.modelId || null;
+          const metaEntry = meta[sessKey];
+          // 读取新格式 model:{id,provider} 或旧格式 modelId
+          if (metaEntry?.model && typeof metaEntry.model === "object") {
+            s.modelId = metaEntry.model.id || null;
+          } else {
+            s.modelId = metaEntry?.modelId || null;
+          }
           allSessions.push(s);
         }
       } catch {}
@@ -527,7 +555,9 @@ export class SessionCoordinator {
       getSkillsForAgent: (ag) => skills.getSkillsForAgent(ag),
       buildTools:     (cwd, customTools, opts) => this._d.buildTools(cwd, customTools, opts),
       resolveModel:   (agentConfig) => {
-        let id = agentConfig?.models?.chat;
+        const chatRef = agentConfig?.models?.chat;
+        const id = typeof chatRef === "object" ? chatRef?.id : chatRef;
+        const provider = typeof chatRef === "object" ? chatRef?.provider : undefined;
         // 非 active agent 可能没有配 models.chat（模板默认为空），回退到全局默认模型
         if (!id) {
           if (models.defaultModel) {
@@ -537,7 +567,7 @@ export class SessionCoordinator {
           log.error(`[resolveModel] agentConfig 未指定 models.chat，也没有默认模型`);
           throw new Error(t("error.resolveModelNoChatModel"));
         }
-        const found = findModel(models.availableModels, id);
+        const found = findModel(models.availableModels, id, provider);
         if (!found) {
           // 模型 ID 在可用列表中找不到，尝试回退到默认模型
           if (models.defaultModel) {
@@ -601,12 +631,15 @@ export class SessionCoordinator {
 
       const execCwd = opts.cwd || this._d.getHomeCwd() || process.cwd();
       const models = this._d.getModels();
-      const agentPreferredModel = targetAgent.config?.models?.chat;
-      const modelId = opts.model ? null : agentPreferredModel;
+      const agentPreferredRef = targetAgent.config?.models?.chat;
+      const modelId = opts.model ? null
+        : (typeof agentPreferredRef === "object" ? agentPreferredRef?.id : agentPreferredRef);
+      const modelProvider = opts.model ? undefined
+        : (typeof agentPreferredRef === "object" ? agentPreferredRef?.provider : undefined);
       let resolvedModel = opts.model;
       if (!resolvedModel) {
         if (modelId) {
-          resolvedModel = findModel(models.availableModels, modelId);
+          resolvedModel = findModel(models.availableModels, modelId, modelProvider);
         }
         if (!resolvedModel) {
           // agent 未配 models.chat 或配置的模型不在可用列表：fallback 到当前默认模型

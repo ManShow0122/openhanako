@@ -499,12 +499,14 @@ export class HanaEngine {
       console.warn("[engine] ⚠ 未找到可用模型，请在设置中配置 API key");
       this._models.defaultModel = null;
     } else {
-      const preferredId = this.agent.config.models?.chat;
+      const chatRef = this.agent.config.models?.chat;
+      const preferredId = typeof chatRef === "object" ? chatRef?.id : chatRef;
+      const preferredProvider = typeof chatRef === "object" ? chatRef?.provider : undefined;
       if (!preferredId) {
         console.warn("[engine] ⚠ 未配置 models.chat，defaultModel 为 null");
         this._models.defaultModel = null;
       } else {
-        const model = findModel(availableModels, preferredId);
+        const model = findModel(availableModels, preferredId, preferredProvider);
         if (!model) {
           console.error(`[engine] ⚠ 配置的模型 "${preferredId}" 不在可用列表中，defaultModel 为 null`);
           this._models.defaultModel = null;

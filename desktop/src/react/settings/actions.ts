@@ -104,11 +104,14 @@ export async function loadSettingsConfig() {
       globalModelsConfig: globalModels,
       homeFolder: config.desk?.home_folder || null,
       currentPins: pinnedData.pins || [],
-      pendingDefaultModel: config.models?.chat
-        ? (providerLookup(config.models.chat)
-            ? `${providerLookup(config.models.chat)}:${config.models.chat}`
-            : config.models.chat)
-        : '',
+      pendingDefaultModel: (() => {
+        const chatRaw = config.models?.chat;
+        if (!chatRaw) return '';
+        // 新格式 {id, provider} 或旧格式裸字符串
+        const chatId = typeof chatRaw === 'object' ? chatRaw.id : chatRaw;
+        const chatProv = typeof chatRaw === 'object' ? chatRaw.provider : providerLookup(chatId);
+        return chatProv ? `${chatProv}:${chatId}` : chatId;
+      })(),
     });
   } catch (err) {
     console.error('[settings] load failed:', err);

@@ -78,7 +78,14 @@ export class ConfigCoordinator {
     const prefs = this._prefs();
     const result = {};
     for (const [field, prefKey] of SHARED_MODEL_KEYS) {
-      result[field] = prefs[prefKey] || null;
+      const raw = prefs[prefKey];
+      if (typeof raw === "object" && raw?.id) {
+        result[field] = raw;  // new format {id, provider}
+      } else if (raw) {
+        result[field] = raw;  // old format string — kept as-is for backward compat
+      } else {
+        result[field] = null;
+      }
     }
     return result;
   }
@@ -286,7 +293,7 @@ export class ConfigCoordinator {
     const metaPath = path.join(agent.sessionDir, "session-meta.json");
 
     const sessionCoord = this._d.getSessionCoordinator();
-    const modelId = sessionCoord?.getCurrentSessionModelId() || null;
+    const modelRef = sessionCoord?.getCurrentSessionModelRef() || null;
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -296,7 +303,7 @@ export class ConfigCoordinator {
         meta[sessKey] = {
           ...meta[sessKey],
           memoryEnabled: agent.memoryEnabled,
-          ...(modelId && { modelId }),
+          ...(modelRef && { model: modelRef }),
         };
         fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
         return;
@@ -324,8 +331,11 @@ export class ConfigCoordinator {
 
     // 切换聊天模型：不需要 sync，模型早已注册
     if (partial.models?.chat) {
-      const chatProvider = partial.api?.provider || undefined;
-      const newModel = findModel(models.availableModels, partial.models.chat, chatProvider);
+      const chatRaw = partial.models.chat;
+      const chatId = typeof chatRaw === "object" ? chatRaw.id : chatRaw;
+      const chatProvider = (typeof chatRaw === "object" ? chatRaw.provider : null)
+        || partial.api?.provider || undefined;
+      const newModel = findModel(models.availableModels, chatId, chatProvider);
       if (newModel) {
         models.defaultModel = newModel;
         models.currentModel = newModel;
@@ -339,7 +349,7 @@ export class ConfigCoordinator {
         }
         // 同步 SessionEntry 快照
         const sessionCoord = this._d.getSessionCoordinator();
-        sessionCoord?.updateCurrentSessionModelId(partial.models.chat);
+        sessionCoord?.updateCurrentSessionModelId(chatId);
         this.persistSessionMeta();
       }
     }
