@@ -172,28 +172,47 @@ export function syncFavoritesToModelsJson(configPath, opts = {}) {
     }
   }
   // ── 4. 按 provider 分组必须保留的模型 ──
-  // 支持 "provider/model" 命名空间格式：显式指定 provider 时直接使用，
-  // 裸 model ID 走反查表。避免带命名空间的配置被跳过或绑到错误 provider。
+  // 支持三种格式：
+  //   1. {id, provider} 对象 — 新格式，直接使用 provider
+  //   2. "provider/modelId" 字符串 — 命名空间格式
+  //   3. 裸 "modelId" 字符串 — 旧格式，走反查表
   const providerModels = new Map(); // providerName → Set<modelId>
-  for (const mid of mustKeep) {
+  for (const item of mustKeep) {
     let prov, modelId;
-    if (mid.includes("/")) {
-      const slashIdx = mid.indexOf("/");
-      const maybeProv = mid.slice(0, slashIdx);
-      const maybeModel = mid.slice(slashIdx + 1);
-      // 检查前缀是否是已知 provider（避免误拆 OpenRouter 风格 ID 如 "anthropic/claude-opus-4-6"）
-      if (modelToProvider.has(maybeModel) || globalProviders[maybeProv] || _defaultModels[maybeProv]) {
-        prov = maybeProv;
-        modelId = maybeModel;
+
+    // 新格式：对象 {id, provider}
+    if (typeof item === "object" && item !== null && item.id) {
+      if (item.provider) {
+        prov = item.provider;
+        modelId = item.id;
+      } else {
+        // 对象但缺 provider，fallback 到反查
+        prov = modelToProvider.get(item.id);
+        modelId = item.id;
+      }
+    } else if (typeof item === "string") {
+      const mid = item;
+      // 命名空间格式 "provider/modelId"
+      if (mid.includes("/")) {
+        const slashIdx = mid.indexOf("/");
+        const maybeProv = mid.slice(0, slashIdx);
+        const maybeModel = mid.slice(slashIdx + 1);
+        // 检查前缀是否是已知 provider（避免误拆 OpenRouter 风格 ID 如 "anthropic/claude-opus-4-6"）
+        if (modelToProvider.has(maybeModel) || globalProviders[maybeProv] || _defaultModels[maybeProv]) {
+          prov = maybeProv;
+          modelId = maybeModel;
+        }
+      }
+      if (!prov) {
+        // 裸 ID 走反查表
+        prov = modelToProvider.get(mid);
+        modelId = mid;
       }
     }
+
     if (!prov) {
-      // 裸 ID 走反查表
-      prov = modelToProvider.get(mid);
-      modelId = mid;
-    }
-    if (!prov) {
-      console.warn(`\x1b[33m  [sync] 模型 "${mid}" 未绑定 provider，跳过\x1b[0m`);
+      const displayId = typeof item === "object" ? item?.id : item;
+      console.warn(`\x1b[33m  [sync] 模型 "${displayId}" 未绑定 provider，跳过\x1b[0m`);
       continue;
     }
     if (!providerModels.has(prov)) providerModels.set(prov, new Set());
