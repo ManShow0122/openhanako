@@ -8,6 +8,7 @@ user/
 # 文档 / 参考文件
 # ═══════════════════════════════════════════
 .docs/
+CLAUDE.md
 docs/superpowers/
 .superpowers/
 archived/
@@ -19,6 +20,8 @@ handoff-*.md
 # ═══════════════════════════════════════════
 dist/
 dist-server/
+dist-server-bundle/
+desktop/main.bundle.cjs
 .cache/
 desktop/dist-renderer/
 vendor/
