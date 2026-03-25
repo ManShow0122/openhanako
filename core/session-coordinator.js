@@ -17,6 +17,7 @@ import { createModuleLogger } from "../lib/debug-log.js";
 import { BrowserManager } from "../lib/browser/browser-manager.js";
 import { t, getLocale } from "../server/i18n.js";
 import { READ_ONLY_BUILTIN_TOOLS } from "./config-coordinator.js";
+import { findModel } from "../shared/model-ref.js";
 
 const log = createModuleLogger("session");
 
@@ -536,7 +537,7 @@ export class SessionCoordinator {
           log.error(`[resolveModel] agentConfig 未指定 models.chat，也没有默认模型`);
           throw new Error(t("error.resolveModelNoChatModel"));
         }
-        const found = models.availableModels.find(m => m.id === id);
+        const found = findModel(models.availableModels, id);
         if (!found) {
           // 模型 ID 在可用列表中找不到，尝试回退到默认模型
           if (models.defaultModel) {
@@ -605,7 +606,7 @@ export class SessionCoordinator {
       let resolvedModel = opts.model;
       if (!resolvedModel) {
         if (modelId) {
-          resolvedModel = models.availableModels.find(m => m.id === modelId);
+          resolvedModel = findModel(models.availableModels, modelId);
         }
         if (!resolvedModel) {
           // agent 未配 models.chat 或配置的模型不在可用列表：fallback 到当前默认模型

@@ -15,6 +15,7 @@ import { debugLog } from "../lib/debug-log.js";
 import { READ_ONLY_BUILTIN_TOOLS } from "./config-coordinator.js";
 import { t, getLocale } from "../server/i18n.js";
 import { safeReadJSON } from "../shared/safe-fs.js";
+import { findModel } from "../shared/model-ref.js";
 
 function getSteerPrefix() {
   const isZh = getLocale().startsWith("zh");
@@ -155,7 +156,7 @@ export class BridgeSessionManager {
         if (!chatModelId) {
           throw new Error(t("error.bridgeAgentNoChatModel", { name: agent.agentName }));
         }
-        const chatModel = mm.availableModels.find(m => m.id === chatModelId);
+        const chatModel = findModel(mm.availableModels, chatModelId);
         if (!chatModel) {
           throw new Error(t("error.bridgeAgentModelNotAvailable", { name: agent.agentName, model: chatModelId }));
         }
@@ -186,7 +187,7 @@ export class BridgeSessionManager {
         if (!ownerModelId) {
           throw new Error(t("error.bridgeAgentNoChatModel", { name: agent.agentName }));
         }
-        const ownerModel = mm.availableModels.find(m => m.id === ownerModelId);
+        const ownerModel = findModel(mm.availableModels, ownerModelId);
         if (!ownerModel) {
           throw new Error(t("error.bridgeAgentModelNotAvailable", { name: agent.agentName, model: ownerModelId }));
         }

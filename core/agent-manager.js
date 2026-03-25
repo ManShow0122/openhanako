@@ -17,6 +17,7 @@ import { ActivityStore } from "../lib/desk/activity-store.js";
 import {
   generateAgentId as _generateAgentId,
 } from "./llm-utils.js";
+import { findModel } from "../shared/model-ref.js";
 
 const log = createModuleLogger("agent-mgr");
 
@@ -295,7 +296,7 @@ export class AgentManager {
       const preferredId = this.agent.config.models?.chat;
       const models = this._d.getModels();
       if (preferredId) {
-        const model = models.availableModels.find(m => m.id === preferredId);
+        const model = findModel(models.availableModels, preferredId);
         if (!model) {
           throw new Error(t("error.agentModelNotAvailable", { id: agentId, model: preferredId }));
         }
