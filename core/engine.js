@@ -304,8 +304,8 @@ export class HanaEngine {
     if (!ov) return model;
     return {
       ...model,
-      vision: ov.vision !== undefined ? ov.vision : (model.vision || false),
-      reasoning: ov.reasoning !== undefined ? ov.reasoning : (model.reasoning || false),
+      vision: ov.vision !== undefined ? ov.vision : model.vision,
+      reasoning: ov.reasoning !== undefined ? ov.reasoning : model.reasoning,
       contextWindow: ov.context || model.contextWindow || null,
       maxTokens: ov.maxOutput || model.maxTokens || null,
     };
