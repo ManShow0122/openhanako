@@ -26,6 +26,10 @@ export default defineConfig({
         "exceljs",
         "mammoth",
         "fsevents",
+
+        // qrcode: 有 browser/node 双入口，Vite 会选 browser 版（期望 DOM canvas）。
+        // 服务端需要 Node.js 版（纯 JS 渲染），必须走 npm 原生解析。
+        "qrcode",
       ],
       output: {
         // 所有源码模块全部合并到一个文件。
