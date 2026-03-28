@@ -580,6 +580,14 @@ export class HanaEngine {
   }
 
   async dispose() {
+    // 先卸载 plugins（它们可能依赖 engine 资源）
+    if (this._pluginManager) {
+      for (const p of this._pluginManager.listPlugins()) {
+        if (p.status === "loaded") {
+          await this._pluginManager.unloadPlugin(p.id);
+        }
+      }
+    }
     this._skills?.unwatch();
     await this._agentMgr.disposeAll(this._sessionCoord);
     await this._sessionCoord.cleanupSession();

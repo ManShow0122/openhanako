@@ -3,7 +3,7 @@ import path from "path";
 import { createPluginContext } from "./plugin-context.js";
 
 const KNOWN_CONTRIBUTION_DIRS = [
-  "tools", "routes", "skills", "hooks", "agents", "commands", "providers",
+  "tools", "routes", "skills", "agents", "commands", "providers",
 ];
 
 export class PluginManager {
@@ -131,24 +131,12 @@ export class PluginManager {
     const toolsDir = path.join(entry.pluginDir, "tools");
     if (!fs.existsSync(toolsDir)) return;
     const files = fs.readdirSync(toolsDir).filter((f) => f.endsWith(".js"));
-    const ctx = {
+    const ctx = createPluginContext({
+      pluginId: entry.id,
+      pluginDir: entry.pluginDir,
+      dataDir: path.join(this._dataDir, entry.id),
       bus: this._bus,
-      config: {
-        get: (key) => {
-          try {
-            const p = path.join(this._dataDir, entry.id, "config.json");
-            const data = JSON.parse(fs.readFileSync(p, "utf-8"));
-            return key ? data[key] : data;
-          } catch { return key ? undefined : {}; }
-        },
-      },
-      log: {
-        info: (...a) => console.log(`[plugin:${entry.id}]`, ...a),
-        warn: (...a) => console.warn(`[plugin:${entry.id}]`, ...a),
-        error: (...a) => console.error(`[plugin:${entry.id}]`, ...a),
-        debug: (...a) => console.debug(`[plugin:${entry.id}]`, ...a),
-      },
-    };
+    });
     for (const file of files) {
       const filePath = path.join(toolsDir, file);
       try {
@@ -321,7 +309,8 @@ export class PluginManager {
       }
       let result;
       try {
-        result = await hookEntry._cache(current);
+        const hookCtx = { pluginId: hookEntry.pluginId, eventType, bus: this._bus };
+        result = await hookEntry._cache(current, hookCtx);
       } catch (err) {
         console.error(`[plugin-manager] hook handler "${hookEntry.handlerPath}" threw:`, err.message);
         continue;
