@@ -46,7 +46,7 @@ function InputAreaInner() {
   const pendingNewSession = useStore(s => s.pendingNewSession);
   const currentSessionPath = useStore(s => s.currentSessionPath);
   const compacting = useStore(s => currentSessionPath ? s.compactingSessions.includes(currentSessionPath) : false);
-  const inlineError = useStore(s => s.inlineError);
+  const inlineError = useStore(s => s.inlineErrors[s.currentSessionPath || ''] ?? s.inlineError);
   const todosBySession = useStore(s => s.todosBySession);
   const sessionTodos = (todosBySession && currentSessionPath && todosBySession[currentSessionPath]) || [];
   const attachedFiles = useStore(s => s.attachedFiles);

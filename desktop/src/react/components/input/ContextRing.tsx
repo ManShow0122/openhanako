@@ -13,11 +13,16 @@ export function ContextRing() {
   const [compacting, setCompacting] = useState(false);
   const [hovered, setHovered] = useState(false);
 
-  // 从 Zustand store 同步 context 数据
-  const storeContextTokens = useStore(s => s.contextTokens);
-  const storeContextWindow = useStore(s => s.contextWindow);
-  const storeContextPercent = useStore(s => s.contextPercent);
+  // 从 Zustand store 同步 context 数据（keyed store 优先，compat global 兜底）
   const currentSessionPath = useStore(s => s.currentSessionPath);
+  const { storeContextTokens, storeContextWindow, storeContextPercent } = useStore(s => {
+    const entry = s.contextBySession[s.currentSessionPath || ''];
+    return {
+      storeContextTokens: entry?.tokens ?? s.contextTokens,
+      storeContextWindow: entry?.window ?? s.contextWindow,
+      storeContextPercent: entry?.percent ?? s.contextPercent,
+    };
+  });
   const storeCompacting = useStore(s => currentSessionPath ? s.compactingSessions.includes(currentSessionPath) : false);
 
   useEffect(() => {
