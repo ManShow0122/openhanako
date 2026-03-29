@@ -237,7 +237,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
         // 不在这里关闭 thinking 状态
       } else if (sub === "error") {
         ss.hasError = true;
-        if (isActive) broadcast({ type: "error", message: event.assistantMessageEvent.error || "Unknown error" });
+        if (isActive) broadcast({ type: "error", message: event.assistantMessageEvent.error || "Unknown error", sessionPath });
       }
     } else if (event.type === "tool_execution_start") {
       if (!ss) return;
@@ -330,7 +330,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
     } else if (event.type === "devlog") {
       broadcast({ type: "devlog", text: event.text, level: event.level });
     } else if (event.type === "browser_bg_status") {
-      broadcast({ type: "browser_bg_status", running: event.running, url: event.url });
+      broadcast({ type: "browser_bg_status", running: event.running, url: event.url, sessionPath });
     } else if (event.type === "cron_confirmation" && event.confirmId) {
       // 新的阻塞式 cron 确认（通过 emitEvent 触发）
       if (!ss) return;
@@ -374,7 +374,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
     } else if (event.type === "bridge_status") {
       broadcast({ type: "bridge_status", platform: event.platform, status: event.status, error: event.error });
     } else if (event.type === "plan_mode") {
-      broadcast({ type: "plan_mode", enabled: event.enabled });
+      broadcast({ type: "plan_mode", enabled: event.enabled, sessionPath });
     } else if (event.type === "notification") {
       broadcast({ type: "notification", title: event.title, body: event.body });
     } else if (event.type === "channel_new_message") {
@@ -459,7 +459,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
 
       // 空回复检测：本轮没有文本输出也没有工具调用，提示用户检查配置
       if (!ss.hasOutput && !ss.hasToolCall && !ss.hasThinking && !ss.hasError && isActive) {
-        broadcast({ type: "error", message: t("error.modelNoResponse") });
+        broadcast({ type: "error", message: t("error.modelNoResponse"), sessionPath });
       }
 
       // ── token usage 事件（供插件监听做用量统计）──
@@ -601,15 +601,15 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
               const compactPath = msg.sessionPath || engine.currentSessionPath;
               const session = engine.getSessionByPath(compactPath);
               if (!session) {
-                wsSend(ws, { type: "error", message: t("error.noActiveSession") });
+                wsSend(ws, { type: "error", message: t("error.noActiveSession"), sessionPath: compactPath });
                 return;
               }
               if (session.isCompacting) {
-                wsSend(ws, { type: "error", message: t("error.compacting") });
+                wsSend(ws, { type: "error", message: t("error.compacting"), sessionPath: compactPath });
                 return;
               }
               if (engine.isSessionStreaming(compactPath)) {
-                wsSend(ws, { type: "error", message: t("error.waitForReply") });
+                wsSend(ws, { type: "error", message: t("error.waitForReply"), sessionPath: compactPath });
                 return;
               }
               broadcast({ type: "compaction_start", sessionPath: compactPath });
@@ -629,7 +629,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
                   broadcast({ type: "compaction_end", sessionPath: compactPath });
                 } else {
                   broadcast({ type: "compaction_end", sessionPath: compactPath });
-                  wsSend(ws, { type: "error", message: t("error.compactFailed", { msg: errMsg }) });
+                  wsSend(ws, { type: "error", message: t("error.compactFailed", { msg: errMsg }), sessionPath: compactPath });
                 }
               }
               return;
@@ -642,16 +642,16 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
                 const MAX_IMAGES = 10;
                 const MAX_BYTES = 20 * 1024 * 1024; // 20MB base64 ≈ 15MB 原始
                 if (msg.images.length > MAX_IMAGES) {
-                  wsSend(ws, { type: "error", message: t("error.maxImages", { max: MAX_IMAGES }) });
+                  wsSend(ws, { type: "error", message: t("error.maxImages", { max: MAX_IMAGES }), sessionPath: msg.sessionPath });
                   return;
                 }
                 for (const img of msg.images) {
                   if (!img?.mimeType || !ALLOWED_MIME.has(img.mimeType)) {
-                    wsSend(ws, { type: "error", message: t("error.unsupportedImageFormat", { mime: img?.mimeType || "unknown" }) });
+                    wsSend(ws, { type: "error", message: t("error.unsupportedImageFormat", { mime: img?.mimeType || "unknown" }), sessionPath: msg.sessionPath });
                     return;
                   }
                   if (img.data && img.data.length > MAX_BYTES) {
-                    wsSend(ws, { type: "error", message: t("error.imageTooLarge") });
+                    wsSend(ws, { type: "error", message: t("error.imageTooLarge"), sessionPath: msg.sessionPath });
                     return;
                   }
                 }
@@ -671,7 +671,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
               // Phase 2: 客户端可指定 sessionPath，否则用焦点 session
               const promptSessionPath = msg.sessionPath || engine.currentSessionPath;
               if (engine.isSessionStreaming(promptSessionPath)) {
-                wsSend(ws, { type: "error", message: t("error.stillStreaming", { name: engine.agentName }) });
+                wsSend(ws, { type: "error", message: t("error.stillStreaming", { name: engine.agentName }), sessionPath: promptSessionPath });
                 return;
               }
               const ss = getState(promptSessionPath);
@@ -696,7 +696,7 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
             const appErr = AppError.wrap(err);
             errorBus.report(appErr, { context: { wsMessageType: msg.type } });
             if (!appErr.message?.includes('aborted')) {
-              wsSend(ws, { type: 'error', message: appErr.message || 'Unknown error', error: appErr.toJSON() });
+              wsSend(ws, { type: 'error', message: appErr.message || 'Unknown error', error: appErr.toJSON(), sessionPath: msg.sessionPath });
             }
           });
         },
