@@ -177,10 +177,19 @@ export class PluginManager {
         if (!mod.name || !mod.description || typeof mod.execute !== "function") continue;
         const origExecute = mod.execute;
         this._tools.push({
-          name: `${entry.id}.${mod.name}`,
+          name: `${entry.id}_${mod.name}`,
           description: mod.description,
           parameters: mod.parameters ?? {},
-          execute: (input, runtimeCtx) => origExecute(input, runtimeCtx ? { ...ctx, ...runtimeCtx } : ctx),
+          execute: async (_toolCallId, params, runtimeCtx) => {
+            const raw = await origExecute(params, runtimeCtx ? { ...ctx, ...runtimeCtx } : ctx);
+            // Pi SDK 期望 { content: ContentBlock[], details? }
+            // Plugin tool 可能返回纯字符串，需要包装
+            if (typeof raw === "string") {
+              return { content: [{ type: "text", text: raw }] };
+            }
+            if (raw && raw.content) return raw;
+            return { content: [{ type: "text", text: String(raw ?? "") }] };
+          },
           _pluginId: entry.id,
         });
       } catch (err) {
@@ -197,7 +206,7 @@ export class PluginManager {
    */
   addTool(pluginId, toolDef) {
     const tool = {
-      name: `${pluginId}.${toolDef.name}`,
+      name: `${pluginId}_${toolDef.name}`,
       description: toolDef.description || "",
       parameters: toolDef.parameters || { type: "object", properties: {} },
       execute: toolDef.execute,

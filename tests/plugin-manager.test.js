@@ -169,7 +169,7 @@ describe("tool loading", () => {
     await pm.loadAll();
     const tools = pm.getAllTools();
     expect(tools).toHaveLength(1);
-    expect(tools[0].name).toBe("search-plugin.web-search");
+    expect(tools[0].name).toBe("search-plugin_web-search");
     expect(tools[0].description).toBe("Search the web");
   });
 
@@ -403,7 +403,7 @@ describe("permission enforcement", () => {
     expect(entry.status).toBe("loaded");
     expect(entry.accessLevel).toBe("restricted");
     // Declarative contributions loaded
-    expect(pm.getAllTools().some(t => t.name === "comm-plug.t")).toBe(true);
+    expect(pm.getAllTools().some(t => t.name === "comm-plug_t")).toBe(true);
     // System-level extension points NOT loaded
     expect(pm.routeRegistry.has("comm-plug")).toBe(false);
     expect(pm.getProviderPlugins().some(p => p._pluginId === "comm-plug")).toBe(false);
@@ -523,7 +523,7 @@ describe("addTool (dynamic registration)", () => {
     });
     const tools = pm.getAllTools();
     expect(tools).toHaveLength(1);
-    expect(tools[0].name).toBe("mcp-bridge.search");
+    expect(tools[0].name).toBe("mcp-bridge_search");
     expect(tools[0]._dynamic).toBe(true);
 
     remove();
@@ -549,7 +549,7 @@ describe("addTool (dynamic registration)", () => {
     await pm.loadAll();
 
     const tools = pm.getAllTools();
-    expect(tools.some(t => t.name === "dyn-plug.dynamic-tool")).toBe(true);
+    expect(tools.some(t => t.name === "dyn-plug_dynamic-tool")).toBe(true);
 
     // unload should clean up
     await pm.unloadPlugin("dyn-plug");
@@ -593,7 +593,7 @@ describe("hot operations", () => {
     const entry = await pm.installPlugin(newDir);
     expect(entry.status).toBe("loaded");
     expect(pm.listPlugins()).toHaveLength(1);
-    expect(pm.getAllTools().some(t => t.name === "hot-plug.greet")).toBe(true);
+    expect(pm.getAllTools().some(t => t.name === "hot-plug_greet")).toBe(true);
   });
 
   it("installPlugin upgrades an existing plugin (same dirName)", async () => {
@@ -609,7 +609,7 @@ describe("hot operations", () => {
     const pm = new PluginManager({ pluginsDir, dataDir, bus: await makeBus() });
     pm.scan();
     await pm.loadAll();
-    expect(pm.getAllTools().some(t => t.name === "upgradeable.v1")).toBe(true);
+    expect(pm.getAllTools().some(t => t.name === "upgradeable_v1")).toBe(true);
 
     // "Upgrade": overwrite tool file
     fs.writeFileSync(path.join(dir, "tools", "v2.js"), `
@@ -621,7 +621,7 @@ describe("hot operations", () => {
 
     await pm.installPlugin(dir);
     // Old tool cleaned up, new tools loaded
-    expect(pm.getAllTools().some(t => t.name === "upgradeable.v2")).toBe(true);
+    expect(pm.getAllTools().some(t => t.name === "upgradeable_v2")).toBe(true);
   });
 
   it("removePlugin unloads and removes from registry", async () => {
@@ -720,7 +720,7 @@ describe("hot operations", () => {
 
     await pm.enablePlugin("enableable");
     expect(pm.getPlugin("enableable").status).toBe("loaded");
-    expect(pm.getAllTools().some(t => t.name === "enableable.t")).toBe(true);
+    expect(pm.getAllTools().some(t => t.name === "enableable_t")).toBe(true);
     expect(mockPrefs.getDisabledPlugins()).not.toContain("enableable");
   });
 

@@ -95,8 +95,9 @@ export default function (app, ctx) {
   app.put("/config", async (c) => {
     try {
       const body = await c.req.json();
-      const current = ctx.config.get() || {};
-      ctx.config.set(null, { ...current, ...body });
+      for (const [key, value] of Object.entries(body)) {
+        ctx.config.set(key, value);
+      }
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: err.message }, 500);

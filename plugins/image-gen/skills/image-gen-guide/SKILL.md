@@ -5,11 +5,11 @@ description: Guide for using the image generation tool
 
 # 图片生成
 
-你可以使用 `image-gen.generate-image` 工具根据文字描述生成图片。当用户请求创建、绘制、生成图片/插画/照片时，调用此工具。
+你可以使用 `image-gen_generate-image` 工具根据文字描述生成图片。当用户请求创建、绘制、生成图片/插画/照片时，调用此工具。
 
 ## 流程
 
-1. 调用 `image-gen.generate-image` 生成图片
+1. 调用 `image-gen_generate-image` 生成图片
 2. 工具返回图片的本地文件路径
 3. **立即调用 `stage_files` 将图片呈现给用户**：`stage_files({ filepaths: ["返回的路径"] })`
 
