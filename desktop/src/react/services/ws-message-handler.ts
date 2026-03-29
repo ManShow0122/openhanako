@@ -353,17 +353,19 @@ export function handleServerMessage(msg: any): void {
     }
 
     case 'status': {
-      // 元数据层：维护所有 session 的 streaming 状态
+      // 元数据层：维护所有 session 的 streaming 状态（用 functional setState 防止 stale closure）
       const sp = msg.sessionPath;
       if (sp) {
-        const list: string[] = state.streamingSessions || [];
         if (msg.isStreaming) {
-          if (!list.includes(sp)) useStore.setState({ streamingSessions: [...list, sp] });
-          // 新一轮 streaming 开始时清除上次的 inline error
-          useStore.setState(s => ({ inlineErrors: { ...s.inlineErrors, [sp]: null } }));
-          if (sp === state.currentSessionPath) useStore.setState({ inlineError: null });
+          useStore.setState(s => ({
+            streamingSessions: s.streamingSessions.includes(sp) ? s.streamingSessions : [...s.streamingSessions, sp],
+            inlineErrors: { ...s.inlineErrors, [sp]: null },
+            ...(sp === s.currentSessionPath ? { inlineError: null } : {}),
+          }));
         } else {
-          useStore.setState({ streamingSessions: list.filter((p: string) => p !== sp) });
+          useStore.setState(s => ({
+            streamingSessions: s.streamingSessions.filter((p: string) => p !== sp),
+          }));
         }
       }
       // 渲染层：只有焦点 session 才影响 UI
