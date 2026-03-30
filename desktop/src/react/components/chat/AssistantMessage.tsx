@@ -173,13 +173,12 @@ const ImageOutputCard = memo(function ImageOutputCard({ filePath, label, ext }: 
   return (
     <div className={styles.imageOutputCard} onClick={() => openFilePreview(filePath, label, ext)} style={{ cursor: 'pointer' }}>
       <img
-        src={`file://${filePath}`}
+        src={filePath.match(/^[A-Za-z]:/) ? `file:///${filePath.replace(/\\/g, '/')}` : `file://${filePath}`}
         alt={displayName}
         className={styles.imageOutputPreview}
         onError={() => setFailed(true)}
         draggable={false}
       />
-      <div className={styles.imageOutputName}>{displayName}</div>
     </div>
   );
 });

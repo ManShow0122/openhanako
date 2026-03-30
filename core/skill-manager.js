@@ -207,8 +207,9 @@ export class SkillManager {
     return results;
   }
 
-  /** 将外部技能追加到 _allSkills（去重：内部优先） */
+  /** 将外部技能追加到 _allSkills（去重：内部优先，先清理旧 external 再重扫） */
   _appendExternalSkills() {
+    this._allSkills = this._allSkills.filter(s => s.source !== "external");
     const existingNames = new Set(this._allSkills.map(s => s.name));
     for (const ext of this.scanExternalSkills()) {
       if (!existingNames.has(ext.name)) {

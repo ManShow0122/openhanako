@@ -62,8 +62,16 @@ modern Japanese illustration style, soft cel-shaded, clean linework, muted warm 
 → prompt: "a sprawling cyberpunk cityscape at night, neon signs reflecting on rain-slicked streets, towering skyscrapers with holographic advertisements, flying vehicles leaving light trails, dense atmospheric fog, vibrant neon pink and electric blue lighting, cinematic wide-angle composition, detailed and immersive"
 （用户指定了赛博朋克，不附加默认画风）
 
+## 图生图（参考图）
+
+当用户消息中包含 `[attached_image: /path/to/file]` 标记时，表示用户上传了图片。如果用户要求基于该图片进行修改、换场景、变风格等操作，**必须**将该路径传入 `image` 参数。
+
+判断规则：
+- 用户发了图片 + 要求修改/换场景/变风格/加元素 → 传 `image` 参数（图生图）
+- 用户发了图片 + 只是问图片内容/聊天 → 不需要调用生图工具
+- 用户没发图片 + 描述想要的画面 → 不传 `image`（纯文生图）
+
 ## 其他
 
-- 用户发送了图片附件并要求修改/参考时，将附件路径传入 `image` 参数
 - 如果生成失败，工具会返回错误信息，请告知用户具体原因
 - 每次生成都要为 `filename` 起名，反映图片内容

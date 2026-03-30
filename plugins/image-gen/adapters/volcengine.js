@@ -1,4 +1,6 @@
 // plugins/image-gen/adapters/volcengine.js
+import fs from "fs";
+import path from "path";
 
 const FORMAT_TO_MIME = {
   png: "image/png",
@@ -42,7 +44,19 @@ export const volcengineAdapter = {
       output_format: outputFormat,
       size: resolveSize(size, aspectRatio, providerDefaults),
     };
-    if (image) body.image = Array.isArray(image) ? image : [image];
+    if (image) {
+      const images = Array.isArray(image) ? image : [image];
+      body.image = await Promise.all(images.map(async img => {
+        // 本地路径 → base64 data URL
+        if (path.isAbsolute(img) && fs.existsSync(img)) {
+          const buf = await fs.promises.readFile(img);
+          const ext = path.extname(img).slice(1).toLowerCase();
+          const mime = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" }[ext] || "image/png";
+          return `data:${mime};base64,${buf.toString("base64")}`;
+        }
+        return img; // URL 或已经是 base64
+      }));
+    }
 
     // Apply provider-specific defaults (watermark defaults to false)
     body.watermark = providerDefaults?.watermark ?? false;

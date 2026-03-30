@@ -23,6 +23,7 @@ export async function execute(input, ctx) {
   try {
     // 1. Resolve model (priority: input → agent config → global default)
     const model = await resolveModel(input, ctx);
+    if (typeof model === "string") return model; // 错误提示
     if (!model) {
       return "图片生成功能未配置。请在设置 → Media 中添加图片模型。";
     }
@@ -86,7 +87,10 @@ export async function execute(input, ctx) {
 async function resolveModel(input, ctx) {
   // Priority 1: explicit input override
   if (input.model) {
-    return { id: input.model, provider: input.provider || "" };
+    if (!input.provider) {
+      return "使用 model 参数时必须同时指定 provider（如 openai、volcengine）。";
+    }
+    return { id: input.model, provider: input.provider };
   }
 
   // Priority 2: agent config

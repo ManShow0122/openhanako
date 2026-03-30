@@ -618,7 +618,7 @@ export class HanaEngine {
     const agentId = this.agent?.id || (opts.agentDir ? path.basename(opts.agentDir) : "");
     const wrappedPluginTools = pluginTools.map(t => ({
       ...t,
-      execute: (toolCallId, params, ...rest) => t.execute(toolCallId, params, { agentId }),
+      execute: (toolCallId, params, runtimeCtx) => t.execute(toolCallId, params, { ...runtimeCtx, agentId }),
     }));
     const allTools = [...ct, ...wrappedPluginTools];
 

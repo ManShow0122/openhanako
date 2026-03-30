@@ -170,6 +170,8 @@ export class BridgeSessionManager {
           model: chatModel,
           thinkingLevel: "none",
           resourceLoader: tempResourceLoader,
+          tools: [],
+          customTools: [],
           settingsManager: this._createSettings(chatModel),
         };
       } else {

@@ -20,6 +20,9 @@ import {
 } from "../session-stream-store.js";
 import { AppError } from "../../shared/errors.js";
 import { errorBus } from "../../shared/error-bus.js";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
 
 /** tool_start 事件只广播这些 arg 字段，避免传输完整文件内容（同步维护：chat-render-shim.ts extractToolDetail） */
 const TOOL_ARG_SUMMARY_KEYS = ["file_path", "path", "command", "pattern", "url", "query", "key", "value", "action", "type", "schedule", "prompt", "label"];
@@ -657,6 +660,20 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
                   }
                 }
               }
+              // 将用户上传的图片持久化到本地，以便工具（如图生图）引用
+              const savedImagePaths = [];
+              if (msg.images?.length && engine.hanakoHome) {
+                const attachDir = path.join(engine.hanakoHome, "attachments");
+                fs.mkdirSync(attachDir, { recursive: true });
+                for (const img of msg.images) {
+                  const ext = (img.mimeType || "image/png").split("/")[1] || "png";
+                  const hash = crypto.createHash("md5").update(img.data.slice(0, 1024)).digest("hex").slice(0, 8);
+                  const filePath = path.join(attachDir, `upload-${Date.now()}-${hash}.${ext}`);
+                  fs.writeFileSync(filePath, Buffer.from(img.data, "base64"));
+                  savedImagePaths.push(filePath);
+                }
+              }
+
               // 非 vision 模型：静默剥离图片，只发文字。不拦截、不报错。
               // vision 未知（undefined）的模型：放行，让 API 决定。
               const curModel = engine.currentModel;
@@ -665,6 +682,11 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
               }
               // 只发图片没文字时补一个占位文本，防止空 text 导致某些 API 异常
               let promptText = msg.text || "";
+              // 在消息文本前附注图片本地路径，供工具（如图生图）引用
+              if (savedImagePaths.length) {
+                const pathNote = savedImagePaths.map(p => `[attached_image: ${p}]`).join("\n");
+                promptText = `${pathNote}\n${promptText}`;
+              }
               if (!promptText.trim() && msg.images?.length) {
                 promptText = t("error.viewImage");
               }
