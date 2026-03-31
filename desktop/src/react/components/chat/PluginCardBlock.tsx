@@ -13,11 +13,12 @@ export function PluginCardBlock({ card }: Props) {
     const theme = document.documentElement.dataset.theme || 'warm-paper';
     const cssUrl = hanaUrl(`/api/plugins/theme.css?theme=${encodeURIComponent(theme)}`);
     const base = hanaUrl(`/api/plugins/${card.pluginId}${card.route}`);
+    const sep = base.includes('?') ? '&' : '?';
     const params = new URLSearchParams();
     if (card.data) params.set('data', JSON.stringify(card.data));
     params.set('hana-theme', theme);
     params.set('hana-css', cssUrl);
-    return `${base}?${params}`;
+    return `${base}${sep}${params}`;
   })();
 
   useEffect(() => {
@@ -33,21 +34,21 @@ export function PluginCardBlock({ card }: Props) {
     return () => { window.removeEventListener('message', onMessage); clearTimeout(timeout); };
   }, []);
 
-  const height = Math.max(100, Math.min(card.height || 200, 600));
-
   // V1: only handle iframe type. Future types (inline, etc.) fall through to nothing.
   if (card.type && card.type !== 'iframe') return null;
 
   return (
     <div className={s.container}>
       {card.title && <div className={s.title}>{card.title}</div>}
-      <iframe
-        ref={iframeRef}
-        className={s.iframe}
-        src={src}
-        sandbox="allow-scripts"
-        style={{ height: `${height}px`, opacity: ready ? 1 : 0.3 }}
-      />
+      <div className={s.iframeWrap}>
+        <iframe
+          ref={iframeRef}
+          className={s.iframe}
+          src={src}
+          sandbox="allow-scripts"
+          style={{ opacity: ready ? 1 : 0.3 }}
+        />
+      </div>
     </div>
   );
 }

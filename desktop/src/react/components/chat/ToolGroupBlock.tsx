@@ -5,7 +5,6 @@
 import { memo, useState, useCallback } from 'react';
 import styles from './Chat.module.css';
 import { extractToolDetail } from '../../utils/message-parser';
-import { PluginCardBlock } from './PluginCardBlock';
 
 import type { ToolCall } from '../../stores/chat-types';
 
@@ -91,9 +90,6 @@ const ToolIndicator = memo(function ToolIndicator({ tool, agentName }: { tool: T
           <span className={styles.toolDots}><span /><span /><span /></span>
         )}
       </div>
-      {tool.done && tool.details?.card && (
-        <PluginCardBlock card={tool.details.card} />
-      )}
     </>
   );
 });

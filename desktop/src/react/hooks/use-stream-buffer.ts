@@ -270,6 +270,10 @@ class StreamBufferManager {
               tools[toolIdx] = { ...tools[toolIdx], done: true, success: !!msg.success, details: msg.details };
               const allDone = tools.every(t => t.done);
               blocks[i] = { ...tg, tools, collapsed: allDone && tools.length > 1 };
+              // Plugin Card: append as independent block after tool_group
+              if (msg.details?.card) {
+                blocks.push({ type: 'plugin_card' as any, card: msg.details.card });
+              }
               return { ...m, blocks };
             }
           }
