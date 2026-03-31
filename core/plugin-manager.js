@@ -7,17 +7,29 @@ const KNOWN_CONTRIBUTION_DIRS = [
   "tools", "routes", "skills", "agents", "commands", "providers",
 ];
 
+/** Semver compare: returns true if a >= b */
+function semverGte(a, b) {
+  const pa = (a || "0.0.0").split(".").map(Number);
+  const pb = (b || "0.0.0").split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true;
+    if ((pa[i] || 0) < (pb[i] || 0)) return false;
+  }
+  return true;
+}
+
 export class PluginManager {
   /**
    * @param {{ pluginsDirs: string[], dataDir: string, bus: object }} opts
    * pluginsDirs: 多个扫描目录，先内嵌后用户（靠前的优先）
    * 兼容旧签名 { pluginsDir: string } → 自动转为单元素数组
    */
-  constructor({ pluginsDirs, pluginsDir, dataDir, bus, preferencesManager }) {
+  constructor({ pluginsDirs, pluginsDir, dataDir, bus, preferencesManager, appVersion }) {
     this._pluginsDirs = pluginsDirs || (pluginsDir ? [pluginsDir] : []);
     this._dataDir = dataDir;
     this._bus = bus;
     this._preferencesManager = preferencesManager || null;
+    this._appVersion = appVersion || "0.0.0";
     this._plugins = new Map();
     this._scanned = [];
     this._opQueue = Promise.resolve();
@@ -32,6 +44,8 @@ export class PluginManager {
     this._configSchemas = [];
     // extensionFactories: Array<{ pluginId: string, factory: Function }>
     this._extensionFactories = [];
+    this._pages = [];
+    this._widgets = [];
   }
 
   scan() {
@@ -105,6 +119,16 @@ export class PluginManager {
         }
       }
 
+      // minAppVersion check
+      const minVer = desc.manifest?.minAppVersion;
+      if (minVer && !semverGte(this._appVersion, minVer)) {
+        entry.status = "incompatible";
+        entry.error = `requires app v${minVer}+, current v${this._appVersion}`;
+        this._plugins.set(desc.id, entry);
+        console.warn(`[plugin-manager] "${desc.id}" skipped: ${entry.error}`);
+        continue;
+      }
+
       this._plugins.set(desc.id, entry);
       try {
         await this._loadPlugin(entry);
@@ -143,6 +167,8 @@ export class PluginManager {
       await this._loadRoutes(entry);
       await this._loadExtensions(entry);
       await this._loadProviders(entry);
+      this._loadPage(entry);
+      this._loadWidget(entry);
 
       // Lifecycle (index.js)
       const indexPath = path.join(entry.pluginDir, "index.js");
@@ -186,11 +212,19 @@ export class PluginManager {
             const raw = await origExecute(params, runtimeCtx ? { ...ctx, ...runtimeCtx } : ctx);
             // Pi SDK 期望 { content: ContentBlock[], details? }
             // Plugin tool 可能返回纯字符串，需要包装
+            let result;
             if (typeof raw === "string") {
-              return { content: [{ type: "text", text: raw }] };
+              result = { content: [{ type: "text", text: raw }] };
+            } else if (raw && raw.content) {
+              result = raw;
+            } else {
+              result = { content: [{ type: "text", text: String(raw ?? "") }] };
             }
-            if (raw && raw.content) return raw;
-            return { content: [{ type: "text", text: String(raw ?? "") }] };
+            // Plugin Card: auto-inject pluginId
+            if (result.details?.card && !result.details.card.pluginId) {
+              result.details.card.pluginId = ctx.pluginId;
+            }
+            return result;
           },
           _pluginId: entry.id,
         });
@@ -364,6 +398,48 @@ export class PluginManager {
     return [...this._configSchemas];
   }
 
+  // ── Page / Widget loader ──────────────────────────────────────────────────
+
+  _loadPage(entry) {
+    const page = entry.manifest?.contributes?.page;
+    if (!page) return;
+    if (entry.accessLevel !== 'full-access') {
+      entry.ctx?.log?.warn('page contribution requires full-access, skipping');
+      return;
+    }
+    const routesDir = path.join(entry.pluginDir, 'routes');
+    if (!fs.existsSync(routesDir)) {
+      entry.ctx?.log?.warn(`page declares route "${page.route}" but routes/ directory not found`);
+      return;
+    }
+    this._pages.push({
+      pluginId: entry.id,
+      title: page.title || entry.id,
+      icon: page.icon || null,
+      route: page.route,
+    });
+  }
+
+  _loadWidget(entry) {
+    const widget = entry.manifest?.contributes?.widget;
+    if (!widget) return;
+    if (entry.accessLevel !== 'full-access') {
+      entry.ctx?.log?.warn('widget contribution requires full-access, skipping');
+      return;
+    }
+    const routesDir = path.join(entry.pluginDir, 'routes');
+    if (!fs.existsSync(routesDir)) {
+      entry.ctx?.log?.warn(`widget declares route "${widget.route}" but routes/ directory not found`);
+      return;
+    }
+    this._widgets.push({
+      pluginId: entry.id,
+      title: widget.title || entry.id,
+      icon: widget.icon || null,
+      route: widget.route,
+    });
+  }
+
   // ── Task 10: Agent templates + Provider loader ───────────────────────────
 
   async _loadAgentTemplates(entry) {
@@ -457,6 +533,7 @@ export class PluginManager {
         entry.status = "failed";
         entry.error = err.message;
       }
+      this._bus?.emit({ type: "plugin_ui_changed" });
       return entry;
     });
   }
@@ -477,6 +554,7 @@ export class PluginManager {
       } else {
         console.warn("[plugin-manager] removePlugin: preferencesManager unavailable, disabled list not updated");
       }
+      this._bus?.emit({ type: "plugin_ui_changed" });
       return entry.pluginDir;
     });
   }
@@ -497,6 +575,7 @@ export class PluginManager {
       } else {
         console.warn("[plugin-manager] disablePlugin: preferencesManager unavailable, preference not persisted");
       }
+      this._bus?.emit({ type: "plugin_ui_changed" });
     });
   }
 
@@ -516,6 +595,7 @@ export class PluginManager {
         const allowed = this._preferencesManager?.getAllowFullAccessPlugins() || false;
         if (!allowed) {
           entry.status = "restricted";
+          this._bus?.emit({ type: "plugin_ui_changed" });
           return;
         }
       }
@@ -530,6 +610,7 @@ export class PluginManager {
         entry.status = "failed";
         entry.error = err.message;
       }
+      this._bus?.emit({ type: "plugin_ui_changed" });
     });
   }
 
@@ -558,6 +639,7 @@ export class PluginManager {
           entry.status = "restricted";
         }
       }
+      this._bus?.emit({ type: "plugin_ui_changed" });
     });
   }
 
@@ -590,6 +672,8 @@ export class PluginManager {
     this._providerPlugins = this._providerPlugins.filter(p => p._pluginId !== pluginId);
     this._configSchemas = this._configSchemas.filter(s => s.pluginId !== pluginId);
     this._extensionFactories = this._extensionFactories.filter(e => e.pluginId !== pluginId);
+    this._pages = this._pages.filter(p => p.pluginId !== pluginId);
+    this._widgets = this._widgets.filter(w => w.pluginId !== pluginId);
     this.routeRegistry.delete(pluginId);
 
     entry.status = "unloaded";
@@ -628,6 +712,9 @@ export class PluginManager {
   getExtensionFactories() {
     return this._extensionFactories.map(e => e.factory);
   }
+
+  getPages() { return [...this._pages]; }
+  getWidgets() { return [...this._widgets]; }
 
   getPlugin(id) { return this._plugins.get(id) || null; }
   listPlugins() { return [...this._plugins.values()]; }

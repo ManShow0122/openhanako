@@ -2,6 +2,7 @@
   "channel": {
     "tab": "频道",
     "chatTab": "聊天",
+    "moreTabs": "更多标签",
     "empty": "还没有频道 ✿",
     "dmLabel": "私聊",
     "dmHint": "仅显示主助手的私聊",
@@ -1008,6 +1009,12 @@
     "defaultModel": "默认模型",
     "edit": "编辑",
     "delete": "删除"
+  },
+  "ctx": {
+    "cut": "剪切",
+    "copy": "复制",
+    "paste": "粘贴",
+    "selectAll": "全选"
   },
   "desk": {
     "title": "书桌",

@@ -2,6 +2,7 @@
   "channel": {
     "tab": "Channels",
     "chatTab": "Chat",
+    "moreTabs": "More tabs",
     "empty": "No channels yet ✿",
     "dmLabel": "Messages",
     "dmHint": "Primary Agent Only",
@@ -1008,6 +1009,12 @@
     "defaultModel": "Default model",
     "edit": "Edit",
     "delete": "Delete"
+  },
+  "ctx": {
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "selectAll": "Select All"
   },
   "desk": {
     "title": "Desk",

@@ -77,17 +77,19 @@ const ToolIndicator = memo(function ToolIndicator({ tool, agentName }: { tool: T
   const tag = tool.args?.agentId as string | undefined;
 
   return (
-    <div className={styles.toolIndicator} data-tool={tool.name} data-done={String(tool.done)}>
-      <span className={styles.toolDesc}>{label}</span>
-      {detail && <span className={styles.toolDetail}>{detail}</span>}
-      {tag && <span className={styles.toolTag}>{tag}</span>}
-      {tool.done ? (
-        <span className={`${styles.toolStatus} ${tool.success ? styles.toolStatusDone : styles.toolStatusFailed}`}>
-          {tool.success ? '✓' : '✗'}
-        </span>
-      ) : (
-        <span className={styles.toolDots}><span /><span /><span /></span>
-      )}
-    </div>
+    <>
+      <div className={styles.toolIndicator} data-tool={tool.name} data-done={String(tool.done)}>
+        <span className={styles.toolDesc}>{label}</span>
+        {detail && <span className={styles.toolDetail}>{detail}</span>}
+        {tag && <span className={styles.toolTag}>{tag}</span>}
+        {tool.done ? (
+          <span className={`${styles.toolStatus} ${tool.success ? styles.toolStatusDone : styles.toolStatusFailed}`}>
+            {tool.success ? '✓' : '✗'}
+          </span>
+        ) : (
+          <span className={styles.toolDots}><span /><span /><span /></span>
+        )}
+      </div>
+    </>
   );
 });

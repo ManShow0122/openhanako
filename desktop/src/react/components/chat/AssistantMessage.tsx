@@ -7,6 +7,7 @@ import { MarkdownContent } from './MarkdownContent';
 import { MoodBlock } from './MoodBlock';
 import { ThinkingBlock } from './ThinkingBlock';
 import { ToolGroupBlock } from './ToolGroupBlock';
+import { PluginCardBlock } from './PluginCardBlock';
 import { XingCard } from './XingCard';
 import { SettingsConfirmCard } from './SettingsConfirmCard';
 import type { ChatMessage, ContentBlock } from '../../stores/chat-types';
@@ -144,6 +145,8 @@ const ContentBlockView = memo(function ContentBlockView({ block, agentName, yuan
       return <CronConfirmCard confirmId={(block as any).confirmId} jobData={block.jobData} status={block.status} />;
     case 'settings_confirm':
       return <SettingsConfirmCard {...block} />;
+    case 'plugin_card':
+      return <PluginCardBlock card={(block as any).card} />;
     default:
       return null;
   }
