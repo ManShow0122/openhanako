@@ -116,6 +116,8 @@ export function WidgetButtons() {
         </svg>
       </button>
 
+      <div className={s.divider} />
+
       {menu && <ContextMenu items={menu.items} position={menu.position} onClose={() => setMenu(null)} />}
     </div>
   );

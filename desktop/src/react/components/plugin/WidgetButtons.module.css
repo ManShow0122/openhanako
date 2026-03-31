@@ -109,3 +109,11 @@
     color: var(--text);
     background: var(--overlay-light);
 }
+
+.divider {
+    width: 1px;
+    height: 14px;
+    background: var(--overlay-medium);
+    margin: 0 4px;
+    flex-shrink: 0;
+}
