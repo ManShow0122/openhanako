@@ -298,8 +298,17 @@ export function createChatRoute(engine, hub, { upgradeWebSocket }) {
         details: event.result?.details,
       });
 
+      // Card: emit immediately from _cardHint so card appears without waiting for LLM
       if (event.result?.details?._cardHint) {
-        ss._cardHints.push(event.result.details._cardHint);
+        const hint = event.result.details._cardHint;
+        ss._cardHints.push(hint);
+        const attrs = { type: hint.type || "iframe", plugin: hint.plugin, route: hint.route, title: hint.title };
+        emitStreamEvent(sessionPath, ss, { type: "card_start", attrs });
+        if (hint.defaultDescription) {
+          emitStreamEvent(sessionPath, ss, { type: "card_text", delta: hint.defaultDescription });
+        }
+        emitStreamEvent(sessionPath, ss, { type: "card_end" });
+        ss._cardEmitted = true;
       }
 
       // COMPAT(v0.78): present_files → stage_files, remove after v0.90
