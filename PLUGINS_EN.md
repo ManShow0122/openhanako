@@ -165,6 +165,31 @@ return {
 
 The framework automatically extracts `details.media.mediaUrls` and delivers them according to context (desktop renders file cards, bridge sends to the other party). The tool itself doesn't need to be aware of the runtime environment.
 
+#### Visual Cards
+
+Tools can automatically render visual cards (iframes) in the chat by declaring `card` in the return value's `details`:
+
+```js
+return {
+  content: [{ type: "text", text: "Data summary..." }],
+  details: {
+    card: {
+      type: "iframe",
+      route: "/card/chart?symbol=sh600519&period=daily",
+      title: "Kweichow Moutai Daily K",
+      description: "Kweichow Moutai price 1450.00 change +2.11%",
+    },
+  },
+};
+```
+
+- `route`: Plugin route path; the iframe fetches data and renders from this path
+- `title`: Card title (optional)
+- `description`: Plain text summary, used for IM platform fallback and when the plugin is uninstalled
+- `pluginId` is auto-injected by the framework; tools don't need to set it
+- Cards render immediately when the tool completes, independent of LLM behavior
+- Card data is stored in JSONL with the toolResult and auto-restored on session reload
+
 ### Skills (Knowledge Injection)
 
 `skills/*/SKILL.md`, standard frontmatter format:
@@ -329,7 +354,7 @@ Declare in `manifest.json` under `contributes`:
 - `title`: Display name. Accepts a plain string or an i18n object `{ zh, en, ... }`
 - `icon`: Strongly recommended to provide an inline SVG (stroke style, `currentColor`). Falls back to the first character of the title if omitted
 - `route`: Relative path for the plugin route. The actual URL is `/api/plugins/{pluginId}{route}`
-- A plugin can declare at most one `page` or one `widget`, not both
+- A plugin can declare both a `page` and a `widget` simultaneously — they are independent
 - Hovering over the tab shows the plugin's full name (tooltip)
 - When there are more than 5 tabs, extras are collapsed into an overflow dropdown menu; users can drag to reorder
 

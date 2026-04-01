@@ -165,6 +165,31 @@ return {
 
 框架会自动提取 `details.media.mediaUrls` 并根据上下文投递（桌面渲染文件卡片，bridge 发送给对方）。工具本身不需要感知运行环境。
 
+#### 可视化卡片
+
+工具可以在聊天中自动渲染可视化卡片（iframe），在返回值的 `details` 中声明 `card`：
+
+```js
+return {
+  content: [{ type: "text", text: "数据摘要..." }],
+  details: {
+    card: {
+      type: "iframe",
+      route: "/card/chart?symbol=sh600519&period=daily",
+      title: "贵州茅台 日K",
+      description: "贵州茅台 现价1450.00 涨跌+2.11%",
+    },
+  },
+};
+```
+
+- `route`：插件路由路径，iframe 自行从该路径拉数据渲染
+- `title`：卡片标题（可选）
+- `description`：纯文本摘要，用于 IM 平台降级显示和插件卸载后的 fallback
+- `pluginId` 由框架自动注入，工具无需填写
+- 卡片在工具完成时立即渲染，不依赖 LLM 行为
+- 卡片数据随 toolResult 存入 JSONL，会话重载时自动恢复
+
 ### Skills（知识注入）
 
 `skills/*/SKILL.md`，标准 frontmatter 格式：
@@ -329,7 +354,7 @@ export const defaultApi = "openai-completions";
 - `title`：显示名，支持字符串或 `{ zh, en, ... }` 国际化对象
 - `icon`：强烈建议提供内联 SVG（stroke 风格，`currentColor`）。缺省时取 title 首字
 - `route`：插件 route 的相对路径，实际 URL 为 `/api/plugins/{pluginId}{route}`
-- 一个插件最多声明一个 `page` 或一个 `widget`，不能同时声明
+- 一个插件可以同时声明 `page` 和 `widget`，互不冲突
 - 悬停 tab 时显示插件全名（tooltip）
 - Tab 超过 5 个时自动折叠到 overflow 下拉菜单，用户可拖拽排序
 
