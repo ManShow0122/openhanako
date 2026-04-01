@@ -351,8 +351,8 @@ export class HanaEngine {
     return this._skills.getAllSkills(ag || this.agent);
   }
   _getSkillsForAgent(ag) { return this._skills.getSkillsForAgent(ag); }
-  get skillsDir() { return this._skills.skillsDir; }
-  get userSkillsDir() { return this._skills.skillsDir; }
+  get skillsDir() { return this._skills?.skillsDir; }
+  get userSkillsDir() { return this._skills?.skillsDir; }
   get learnedSkillsDir() { return path.join(this.agent.agentDir, "learned-skills"); }
   get modelsJsonPath() { return this._models.modelsJsonPath; }
   get authJsonPath() { return this._models.authJsonPath; }
