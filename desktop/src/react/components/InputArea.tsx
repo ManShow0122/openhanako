@@ -26,14 +26,14 @@ import { SendButton } from './input/SendButton';
 import { QuotedSelectionCard } from './input/QuotedSelectionCard';
 import {
   XING_PROMPT, executeDiary, executeCompact, buildSlashCommands,
-  type SlashCommand,
+  type SlashItem,
 } from './input/slash-commands';
 import styles from './input/InputArea.module.css';
 import type { TodoItem } from '../types';
 
 const EMPTY_TODOS: TodoItem[] = [];
 
-export type { SlashCommand };
+export type { SlashItem };
 
 // ── 主组件 ──
 

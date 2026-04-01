@@ -1,12 +1,12 @@
 import { memo } from 'react';
-import type { SlashCommand } from '../InputArea';
+import type { SlashItem } from '../InputArea';
 import styles from './InputArea.module.css';
 
 export const SlashCommandMenu = memo(function SlashCommandMenu({ commands, selected, busy, onSelect, onHover }: {
-  commands: SlashCommand[];
+  commands: SlashItem[];
   selected: number;
   busy: string | null;
-  onSelect: (cmd: SlashCommand) => void;
+  onSelect: (cmd: SlashItem) => void;
   onHover: (i: number) => void;
 }) {
   return (
