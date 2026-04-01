@@ -11,7 +11,7 @@ import { debugLog } from "../../lib/debug-log.js";
 import { getRawConfig, clearConfigCache } from "../../lib/memory/config-loader.js";
 import { FactStore } from "../../lib/memory/fact-store.js";
 import { splitByScope, injectGlobalFields } from '../../shared/config-scope.js';
-import { resolveAgent } from "../utils/resolve-agent.js";
+import { resolveAgent, resolveAgentStrict, AgentNotFoundError } from "../utils/resolve-agent.js";
 import {
   buildInlineProviderCredentialUpdate,
   clearInlineProviderCredentialFields,
@@ -167,13 +167,14 @@ export function createConfigRoute(engine) {
       if (typeof content !== "string") {
         return c.json({ error: "content must be a string" }, 400);
       }
-      const ishikiPath = path.join(resolveAgent(engine, c).agentDir, "ishiki.md");
+      const ishikiPath = path.join(resolveAgentStrict(engine, c).agentDir, "ishiki.md");
       await fs.writeFile(ishikiPath, content, "utf-8");
       debugLog()?.log("api", `PUT /api/ishiki (saved, ${content.length} chars)`);
       // 触发 system prompt 重建（updateConfig 内部会重新读取 ishiki.md）
       await engine.updateConfig({});
       return c.json({ ok: true });
     } catch (err) {
+      if (err instanceof AgentNotFoundError) return c.json({ error: err.message }, 404);
       debugLog()?.error("api", `PUT /api/ishiki failed: ${err.message}`);
       return c.json({ error: err.message }, 500);
     }
@@ -199,12 +200,13 @@ export function createConfigRoute(engine) {
       if (typeof content !== "string") {
         return c.json({ error: "content must be a string" }, 400);
       }
-      const identityPath = path.join(resolveAgent(engine, c).agentDir, "identity.md");
+      const identityPath = path.join(resolveAgentStrict(engine, c).agentDir, "identity.md");
       await fs.writeFile(identityPath, content, "utf-8");
       debugLog()?.log("api", `PUT /api/identity (saved, ${content.length} chars)`);
       await engine.updateConfig({});
       return c.json({ ok: true });
     } catch (err) {
+      if (err instanceof AgentNotFoundError) return c.json({ error: err.message }, 404);
       debugLog()?.error("api", `PUT /api/identity failed: ${err.message}`);
       return c.json({ error: err.message }, 500);
     }
@@ -282,13 +284,14 @@ export function createConfigRoute(engine) {
         .map(p => `- ${p}`)
         .join("\n")
         + "\n";
-      const pinnedPath = path.join(resolveAgent(engine, c).agentDir, "pinned.md");
+      const pinnedPath = path.join(resolveAgentStrict(engine, c).agentDir, "pinned.md");
       await fs.writeFile(pinnedPath, content, "utf-8");
       debugLog()?.log("api", `PUT /api/pinned (${pins.length} items)`);
       // 触发 system prompt 重建（updateConfig 内部会重新读取 pinned.md）
       await engine.updateConfig({});
       return c.json({ ok: true });
     } catch (err) {
+      if (err instanceof AgentNotFoundError) return c.json({ error: err.message }, 404);
       debugLog()?.error("api", `PUT /api/pinned failed: ${err.message}`);
       return c.json({ error: err.message }, 500);
     }
