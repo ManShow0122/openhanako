@@ -168,6 +168,11 @@
     z-index: 2;
 }
 
+.msgActionsLeft {
+    left: 4px;
+    right: auto;
+}
+
 .msgActionsVisible { opacity: 1 !important; }
 
 .messageGroupAssistant:hover .msgActions,
@@ -223,7 +228,7 @@
 
 /* 选中消息的视觉提示 */
 .messageGroupSelected {
-    background: color-mix(in srgb, var(--hana-accent, #4a9) 5%, transparent);
+    background: rgba(68, 170, 153, 0.05);
     border-radius: 4px;
 }
 

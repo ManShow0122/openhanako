@@ -56,6 +56,9 @@ export async function takeScreenshot(targetMessageId: string, sessionPath: strin
     // 移除操作按钮
     const actions = clone.querySelector('[class*="msgActions"]');
     if (actions) actions.remove();
+    // 移除选中高亮（截图不需要）
+    const selected = clone.querySelectorAll('[class*="messageGroupSelected"]');
+    selected.forEach(el => (el as HTMLElement).classList.forEach(c => { if (c.includes('Selected')) (el as HTMLElement).classList.remove(c); }));
     container.appendChild(clone);
   }
 
