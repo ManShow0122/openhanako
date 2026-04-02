@@ -393,13 +393,13 @@
       "failed": "🌐 {name} 浏览器不听使唤"
     },
     "subagent": {
-      "running": "🧭 {name} 分身有术",
-      "done": "🧭 分身出发了",
+      "running": "🧭 {name} 分身查探中",
+      "done": "🧭 分身回来了",
       "failed": "🧭 分身出了岔子"
     },
     "ask_agent": {
-      "running": "💬 {name} 去问别人了",
-      "done": "💬 已发出询问，等待回复",
+      "running": "💬 {name} 请教中",
+      "done": "💬 回复已收到",
       "failed": "💬 没问到"
     },
     "check_pending_tasks": {

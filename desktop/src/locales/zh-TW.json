@@ -392,13 +392,13 @@
       "failed": "🌐 {name} 瀏覽器不聽使喚"
     },
     "subagent": {
-      "running": "🧭 {name} 分身有術",
-      "done": "🧭 分身出發了",
+      "running": "🧭 {name} 分身查探中",
+      "done": "🧭 分身回來了",
       "failed": "🧭 分身出了岔子"
     },
     "ask_agent": {
-      "running": "💬 {name} 去問別人了",
-      "done": "💬 已發出詢問，等待回覆",
+      "running": "💬 {name} 請教中",
+      "done": "💬 回覆已收到",
       "failed": "💬 沒問到"
     },
     "check_pending_tasks": {

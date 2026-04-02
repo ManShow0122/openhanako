@@ -392,13 +392,13 @@
       "failed": "🌐 {name} 브라우저가 말을 안 들어요"
     },
     "subagent": {
-      "running": "🧭 {name} 분신술!",
-      "done": "🧭 분신을 보냈어요",
+      "running": "🧭 {name} 분신이 조사 중",
+      "done": "🧭 분신이 돌아왔어요",
       "failed": "🧭 분신이 문제가 생겼어요"
     },
     "ask_agent": {
-      "running": "💬 {name}이(가) 다른 사람에게 물어보고 있어요",
-      "done": "💬 질문을 보냈어요, 답변 대기 중",
+      "running": "💬 {name}이(가) 상담 중",
+      "done": "💬 답변을 받았어요",
       "failed": "💬 답변을 못 받았어요"
     },
     "check_pending_tasks": {

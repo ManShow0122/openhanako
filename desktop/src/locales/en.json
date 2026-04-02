@@ -393,13 +393,13 @@
       "failed": "🌐 {name}'s browser wouldn't cooperate"
     },
     "subagent": {
-      "running": "🧭 {name} sent out a clone",
-      "done": "🧭 Clone dispatched",
+      "running": "🧭 {name} is investigating",
+      "done": "🧭 Clone returned",
       "failed": "🧭 Clone ran into trouble"
     },
     "ask_agent": {
-      "running": "💬 {name} is asking around",
-      "done": "💬 Question sent, awaiting reply",
+      "running": "💬 {name} is consulting",
+      "done": "💬 Reply received",
       "failed": "💬 No reply"
     },
     "check_pending_tasks": {
