@@ -14,9 +14,9 @@ export const parameters = {
   properties: {
     prompt:   { type: "string", description: "视频描述（中英文均可）" },
     image:    { type: "string", description: "参考图路径（图生视频）" },
-    duration: { type: "number", description: "视频时长（秒）" },
-    ratio:    { type: "string", description: "长宽比：1:1, 16:9, 9:16, 4:3, 3:4" },
-    model:    { type: "string", description: "模型 ID（可选）" },
+    duration: { type: "number", description: "视频时长 4-15 秒（默认 5）" },
+    ratio:    { type: "string", description: "长宽比：1:1, 16:9, 9:16, 4:3, 3:4, 21:9" },
+    model:    { type: "string", description: "模型版本：seedance2.0, seedance2.0fast（默认 seedance2.0）" },
     provider: { type: "string", description: "指定 provider（可选）" },
   },
   required: ["prompt"],
@@ -74,6 +74,7 @@ export async function execute(input, ctx) {
     type: "video",
     prompt: input.prompt,
     params,
+    sessionPath: ctx.sessionPath,
   });
 
   // If submit returned files, update the task with them
@@ -102,6 +103,7 @@ export async function execute(input, ctx) {
         route: `/card?batch=${batchId}`,
         title: "视频生成",
         description: input.prompt.slice(0, 60),
+        aspectRatio: input.ratio || "16:9",
       },
     },
   };

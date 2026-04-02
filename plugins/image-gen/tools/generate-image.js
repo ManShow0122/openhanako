@@ -16,9 +16,8 @@ export const parameters = {
     count:      { type: "number", description: "并发生成张数，默认 1，最大 4" },
     image:      { type: "string", description: "参考图路径（图生图）" },
     ratio:      { type: "string", description: "长宽比：1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 21:9" },
-    resolution: { type: "string", description: "分辨率：2k, 4k" },
-    quality:    { type: "string", description: "画质：low, medium, high" },
-    model:      { type: "string", description: "模型 ID（可选）" },
+    resolution: { type: "string", description: "分辨率：2k, 4k（默认 2k）" },
+    model:      { type: "string", description: "模型版本：3.0, 3.1, 4.0, 4.1, 4.5, 4.6, 5.0（默认 5.0）" },
     provider:   { type: "string", description: "指定 provider（可选）" },
   },
   required: ["prompt"],
@@ -50,7 +49,6 @@ export async function execute(input, ctx) {
     prompt: input.prompt,
     ...(input.ratio && { ratio: input.ratio }),
     ...(input.resolution && { resolution: input.resolution }),
-    ...(input.quality && { quality: input.quality }),
     ...(input.model && { model: input.model }),
     ...(input.image && { image: input.image }),
   };
@@ -75,6 +73,7 @@ export async function execute(input, ctx) {
       type: "image",
       prompt: input.prompt,
       params,
+      sessionPath: ctx.sessionPath,
     });
 
     // If submit returned files, update the task with them
@@ -114,6 +113,7 @@ export async function execute(input, ctx) {
         route: `/card?batch=${batchId}`,
         title: "图片生成",
         description: `${input.prompt.slice(0, 60)} (${succeeded.length}张)`,
+        aspectRatio: input.ratio || "1:1",
       },
     },
   };
