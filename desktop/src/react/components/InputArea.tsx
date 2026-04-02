@@ -81,6 +81,7 @@ function InputAreaInner() {
   const [slashResult, setSlashResult] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   const isComposing = useRef(false);
+  const [inputText, setInputText] = useState('');
 
   // ── Placeholder ──
   const placeholder = (() => {
@@ -110,9 +111,6 @@ function InputAreaInner() {
       },
     },
   });
-
-  // Derive inputText for backward compat with existing code
-  const inputText = editor?.getText() ?? '';
 
   // Focus trigger from store
   const inputFocusTrigger = useStore(s => s.inputFocusTrigger);
@@ -199,11 +197,12 @@ function InputAreaInner() {
     return slashCommands.filter(c => c.name.startsWith(query));
   }, [inputText, slashCommands]);
 
-  // Slash menu detection via TipTap onUpdate
+  // Sync editor text to React state (drives hasInput / canSend) + slash menu detection
   useEffect(() => {
     if (!editor) return;
     const handler = () => {
       const text = editor.getText();
+      setInputText(text);
       if (text.startsWith('/') && text.length <= 20) {
         setSlashMenuOpen(true);
         setSlashSelected(0);
