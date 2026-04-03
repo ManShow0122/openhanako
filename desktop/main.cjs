@@ -13,6 +13,7 @@ const os = require("os");
 const path = require("path");
 const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
+const { pathToFileURL } = require("url");
 const { initAutoUpdater, checkForUpdatesAuto, setMainWindow: setUpdaterMainWindow, setUpdateChannel, getState: getUpdateState } = require("./auto-updater.cjs");
 const { wrapIpcHandler, wrapIpcOn } = require('./ipc-wrapper.cjs');
 
@@ -787,6 +788,10 @@ function createMainWindow() {
       editorWindow.destroy();
       editorWindow = null;
     }
+    if (_screenshotWin && !_screenshotWin.isDestroyed()) {
+      _screenshotWin.destroy();
+      _screenshotWin = null;
+    }
   });
 }
 
@@ -1327,7 +1332,14 @@ async function handleBrowserCommand(cmd, params) {
       }
       _ensureBrowser();
       const wc = _browserWebView.webContents;
-      await wc.loadURL(params.url);
+      const NAV_TIMEOUT = 30000;
+      await Promise.race([
+        wc.loadURL(params.url),
+        new Promise((_, reject) => setTimeout(() => {
+          try { wc.stop(); } catch {}
+          reject(new Error(`Navigation timed out after ${NAV_TIMEOUT / 1000}s: ${params.url}`));
+        }, NAV_TIMEOUT)),
+      ]);
       await _delay(500);
       const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
       return { url: snap.currentUrl, title: snap.title, snapshot: snap.text };
@@ -1592,6 +1604,242 @@ function createOnboardingWindow(query = {}) {
 // ── 更新检查（统一走 auto-updater.cjs）──
 async function checkForUpdates() {
   await checkForUpdatesAuto();
+}
+
+// ── 截图渲染管线 ──
+
+const SCREENSHOT_THEMES = {
+  "solarized-light":         { width: 460 },
+  "solarized-dark":          { width: 460 },
+  "solarized-light-desktop": { width: 880 },
+  "solarized-dark-desktop":  { width: 880 },
+  "sakura-light":            { width: 460 },
+  "sakura-light-desktop":    { width: 880 },
+};
+
+const SCREENSHOT_MAX_SEGMENT = 4000;
+
+let _screenshotWin = null;
+
+function getScreenshotWindow() {
+  if (_screenshotWin && !_screenshotWin.isDestroyed()) return _screenshotWin;
+  _screenshotWin = new BrowserWindow({
+    width: 460, height: 100,
+    show: false, skipTaskbar: true,
+    webPreferences: { offscreen: true, deviceScaleFactor: 2 },
+  });
+  return _screenshotWin;
+}
+
+let _screenshotLock = Promise.resolve();
+
+function withScreenshotLock(fn) {
+  const prev = _screenshotLock;
+  let resolve;
+  _screenshotLock = new Promise(r => { resolve = r; });
+  return prev.then(() => fn().finally(resolve));
+}
+
+function getScreenshotResourcePath(...segments) {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "screenshot-themes", ...segments);
+  }
+  return path.join(__dirname, "src", "screenshot-themes", ...segments);
+}
+
+function buildScreenshotHTML(payload) {
+  const MarkdownIt = require("markdown-it");
+  const md = new MarkdownIt({ html: true, breaks: true, linkify: true, typographer: true });
+  try {
+    const mk = require("@traptitech/markdown-it-katex");
+    md.use(mk);
+  } catch { /* katex not available */ }
+
+  const themeName = payload.theme;
+  const themeConf = SCREENSHOT_THEMES[themeName];
+  if (!themeConf) throw new Error(`Unknown screenshot theme: ${themeName}`);
+
+  const themeCssPath = getScreenshotResourcePath(`${themeName}.css`);
+  const themeCSS = fs.readFileSync(themeCssPath, "utf-8");
+
+  let katexCSS = "";
+  try {
+    const candidates = [
+      require.resolve("katex/dist/katex.min.css"),
+      path.join(__dirname, "node_modules", "katex", "dist", "katex.min.css"),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) { katexCSS = fs.readFileSync(p, "utf-8"); break; }
+    }
+  } catch { /* no katex */ }
+
+  let extraCSS = "";
+  if (themeName.startsWith("sakura-")) {
+    const isDesktop = themeName.endsWith("-desktop");
+    const branchFile = isDesktop ? "sakura-branch-desktop.png" : "sakura-branch-mobile.png";
+    const flowerFile = isDesktop ? "sakura-flower-desktop.png" : "sakura-flower-mobile.png";
+    const branchUrl = pathToFileURL(getScreenshotResourcePath("sakura", branchFile)).href;
+    const flowerUrl = pathToFileURL(getScreenshotResourcePath("sakura", flowerFile)).href;
+    extraCSS = `:root { --sakura-branch-url: url('${branchUrl}'); --sakura-flower-url: url('${flowerUrl}'); }`;
+  }
+
+  const logoPath = app.isPackaged
+    ? path.join(process.resourcesPath, "assets", "Hanako.png")
+    : path.join(__dirname, "src", "assets", "Hanako.png");
+  const logoUrl = pathToFileURL(logoPath).href;
+
+  function renderBlock(b) {
+    if (b.type === "html") return b.content;
+    if (b.type === "markdown") return md.render(b.content);
+    if (b.type === "image") return `<img src="${b.content}" class="chat-image" />`;
+    return "";
+  }
+
+  let bodyHTML = "";
+  if (payload.mode === "article" && payload.markdown) {
+    bodyHTML = `<article>${md.render(payload.markdown)}</article>`;
+  } else if (payload.messages) {
+    const parts = [];
+    for (const msg of payload.messages) {
+      const blockHTMLs = msg.blocks.map(renderBlock).join("");
+
+      if (payload.mode === "conversation") {
+        const avatarImg = msg.avatarDataUrl
+          ? `<img class="chat-avatar" src="${msg.avatarDataUrl}" />`
+          : `<div class="chat-avatar chat-avatar-fallback"></div>`;
+        parts.push(`
+          <div class="chat-message">
+            <div class="chat-header">
+              ${avatarImg}
+              <span class="chat-name">${msg.name.replace(/</g, "&lt;")}</span>
+            </div>
+            <div class="chat-body">${blockHTMLs}</div>
+          </div>
+        `);
+      } else {
+        parts.push(blockHTMLs);
+      }
+    }
+    bodyHTML = `<article>${parts.join("")}</article>`;
+  }
+
+  const layoutCSS = `
+    .chat-message { margin-bottom: 1.8em; }
+    .chat-header { display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.5em; }
+    .chat-avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+    .chat-avatar-fallback { background: #ddd; }
+    .chat-name { font-size: 0.9em; font-weight: 600; opacity: 0.7; }
+    .chat-body { padding-left: 0; }
+    .chat-body p:last-child { margin-bottom: 0; }
+    .chat-image { max-width: 100%; border-radius: 6px; margin: 0.8em 0; }
+    .watermark {
+      display: flex; align-items: center; justify-content: center;
+      gap: 0.5em; padding: 1.5em 0 1em; opacity: 0.5;
+    }
+    .watermark-logo { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+    .watermark-text { font-size: 0.75em; color: #999; letter-spacing: 0.05em; }
+    html, body { scrollbar-width: none; -ms-overflow-style: none; }
+    html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>${katexCSS}</style>
+  <style>${themeCSS}</style>
+  <style>${extraCSS}</style>
+  <style>${layoutCSS}</style>
+</head>
+<body>
+  ${bodyHTML}
+  <footer class="watermark">
+    <img class="watermark-logo" src="${logoUrl}" />
+    <span class="watermark-text">OpenHanako</span>
+  </footer>
+</body>
+</html>`;
+}
+
+async function screenshotCapture(htmlContent, width) {
+  const offscreen = getScreenshotWindow();
+  const scale = 2;
+
+  offscreen.setSize(width, 100);
+
+  const tmpDir = app.getPath("temp");
+  const tmpHtml = path.join(tmpDir, `hana-ss-${Date.now()}.html`);
+  fs.writeFileSync(tmpHtml, htmlContent, "utf-8");
+
+  try {
+    await offscreen.loadURL(pathToFileURL(tmpHtml).href);
+
+    await offscreen.webContents.executeJavaScript(
+      `document.fonts.ready.then(() => true)`
+    );
+    await new Promise(r => setTimeout(r, 300));
+
+    const totalHeight = await offscreen.webContents.executeJavaScript(`
+      Math.max(
+        document.body.scrollHeight,
+        document.body.offsetHeight,
+        document.documentElement.scrollHeight,
+        document.documentElement.offsetHeight
+      )
+    `);
+
+    let pngBuffer;
+
+    if (totalHeight <= SCREENSHOT_MAX_SEGMENT) {
+      offscreen.setSize(width, totalHeight);
+      await new Promise(r => setTimeout(r, 200));
+      const image = await offscreen.webContents.capturePage();
+      pngBuffer = image.toPNG();
+    } else {
+      const segments = [];
+      let captured = 0;
+      while (captured < totalHeight) {
+        const segH = Math.min(SCREENSHOT_MAX_SEGMENT, totalHeight - captured);
+        offscreen.setSize(width, segH);
+        await offscreen.webContents.executeJavaScript(`window.scrollTo(0, ${captured})`);
+        await new Promise(r => setTimeout(r, 300));
+        const segImage = await offscreen.webContents.capturePage();
+        segments.push(segImage);
+        captured += segH;
+      }
+
+      const actualWidth = width * scale;
+      const actualTotalHeight = totalHeight * scale;
+      const fullBitmap = Buffer.alloc(actualWidth * actualTotalHeight * 4);
+      let yOffset = 0;
+
+      for (const seg of segments) {
+        const bitmap = seg.toBitmap();
+        const size = seg.getSize();
+        const partHeight = size.height;
+        const partRowBytes = size.width * 4;
+        for (let row = 0; row < partHeight; row++) {
+          bitmap.copy(
+            fullBitmap,
+            (yOffset + row) * actualWidth * 4,
+            row * partRowBytes,
+            row * partRowBytes + Math.min(partRowBytes, actualWidth * 4)
+          );
+        }
+        yOffset += partHeight;
+      }
+
+      const fullImage = nativeImage.createFromBitmap(fullBitmap, {
+        width: actualWidth,
+        height: actualTotalHeight,
+      });
+      pngBuffer = fullImage.toPNG();
+    }
+
+    return pngBuffer;
+  } finally {
+    try { fs.unlinkSync(tmpHtml); } catch {}
+  }
 }
 
 // ── IPC ──
@@ -2007,6 +2255,32 @@ wrapIpcHandler("write-file-binary", (_event, filePath, base64Data) => {
     fs.writeFileSync(resolved, Buffer.from(base64Data, "base64"));
     return true;
   } catch { return false; }
+});
+
+wrapIpcHandler("screenshot-render", (_event, payload) => {
+  return withScreenshotLock(async () => {
+    try {
+      const themeConf = SCREENSHOT_THEMES[payload.theme];
+      if (!themeConf) return { success: false, error: `Unknown theme: ${payload.theme}` };
+
+      const htmlContent = buildScreenshotHTML(payload);
+      const pngBuffer = await screenshotCapture(htmlContent, themeConf.width);
+
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const dir = path.join(hanakoHome, "截图");
+      const filePath = path.join(dir, `hanako-${timestamp}.png`);
+
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(filePath, pngBuffer);
+
+      return { success: true, filePath };
+    } catch (err) {
+      console.error("[screenshot-render]", err);
+      return { success: false, error: err.message || String(err) };
+    }
+  });
 });
 
 // 文件监听（artifact 编辑 — 外部变更刷新用）
