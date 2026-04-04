@@ -7,6 +7,7 @@ import { syntaxTree } from '@codemirror/language';
 import { hrDecoration } from './widgets/hr';
 import { handleCheckbox } from './widgets/checkbox';
 import { handleBlockquote } from './widgets/blockquote';
+import { handleCodeBlock } from './widgets/code-block';
 
 export type DecoRange = { from: number; to: number; deco: Decoration };
 
@@ -56,6 +57,9 @@ export function buildMarkdownDecorations(view: EditorView): DecorationSet {
           case 'Blockquote':
             handleBlockquote({ view, node, ranges });
             return;
+          case 'FencedCode':
+            handleCodeBlock({ view, node, activeLines, ranges });
+            return false; // don't traverse children
         }
 
         // ── 活跃行：跳过所有 conceal / replace ──

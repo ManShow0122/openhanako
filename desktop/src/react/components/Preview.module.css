@@ -281,6 +281,12 @@
     top: -1px;
 }
 
+:global(.cm-blockquote-line) {
+    border-left: 3px solid var(--accent);
+    padding-left: 1em;
+    background: var(--overlay-subtle);
+}
+
 /* 拖拽中禁 transition */
 :global(body.resizing) .previewPanel,
 :global(body.resizing) .previewPanelInner {
