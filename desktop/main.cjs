@@ -2055,6 +2055,18 @@ wrapIpcHandler("select-folder", async (event) => {
   return result.filePaths[0];
 });
 
+// 选择附件文件（多选，支持文件和文件夹）
+wrapIpcHandler("select-files", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  if (!win) return [];
+  const result = await dialog.showOpenDialog(win, {
+    properties: ["openFile", "openDirectory", "multiSelections"],
+    title: mt("dialog.selectFiles", null, "Select Files"),
+  });
+  if (result.canceled || !result.filePaths.length) return [];
+  return result.filePaths;
+});
+
 // 选择技能文件/文件夹（支持 .zip / .skill / 文件夹）
 wrapIpcHandler("select-skill", async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
@@ -2304,12 +2316,17 @@ wrapIpcHandler("watch-file", (event, filePath) => {
     _fileWatchers.delete(filePath);
   }
   try {
+    let debounceTimer = null;
     const watcher = fs.watch(filePath, { persistent: false }, (eventType) => {
       if (eventType === "change") {
-        const win = BrowserWindow.fromWebContents(event.sender);
-        if (win && !win.isDestroyed()) {
-          win.webContents.send("file-changed", filePath);
-        }
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          debounceTimer = null;
+          const win = BrowserWindow.fromWebContents(event.sender);
+          if (win && !win.isDestroyed()) {
+            win.webContents.send("file-changed", filePath);
+          }
+        }, 50);
       }
     });
     _fileWatchers.set(filePath, watcher);

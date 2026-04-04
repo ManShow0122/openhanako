@@ -87,9 +87,8 @@ function createEditor(content: string, isMd: boolean) {
 
 async function saveContent(text: string) {
   if (!filePath) return;
-  selfSave = true;
+  lastSavedContent = text;
   await hana?.writeFile(filePath, text);
-  setTimeout(() => { selfSave = false; }, 300);
 }
 
 async function loadContent(data: { filePath: string; title: string; type: string }) {
@@ -108,15 +107,17 @@ async function loadContent(data: { filePath: string; title: string; type: string
   // 文件变更监听
   hana?.watchFile(filePath);
   hana?.onFileChanged((changedPath: string) => {
-    if (changedPath !== filePath || selfSave) return;
+    if (changedPath !== filePath) return;
     hana?.readFile(filePath).then((newContent: string | null) => {
       if (newContent == null || !editorView) return;
+      // Content comparison: same as last write → self-write, ignore
+      if (newContent === lastSavedContent) return;
       const current = editorView.state.doc.toString();
-      if (current !== newContent) {
-        editorView.dispatch({
-          changes: { from: 0, to: current.length, insert: newContent },
-        });
-      }
+      if (current === newContent) return;
+      lastSavedContent = newContent;
+      editorView.dispatch({
+        changes: { from: 0, to: current.length, insert: newContent },
+      });
     });
   });
 }
