@@ -7,6 +7,7 @@
 import fs from "fs";
 import path from "path";
 import { loadConfig, saveConfig } from "../lib/memory/config-loader.js";
+import { safeReadFile, safeReadJSON } from "../shared/safe-fs.js";
 import { FactStore } from "../lib/memory/fact-store.js";
 import { SessionSummaryManager } from "../lib/memory/session-summary.js";
 import { createMemoryTicker } from "../lib/memory/memory-ticker.js";
@@ -17,7 +18,7 @@ import { createDeskManager } from "../lib/desk/desk-manager.js";
 import { CronStore } from "../lib/desk/cron-store.js";
 import { createCronTool } from "../lib/tools/cron-tool.js";
 import { createWebFetchTool } from "../lib/tools/web-fetch.js";
-import { createPresentFilesTool } from "../lib/tools/output-file-tool.js";
+import { createStageFilesTool } from "../lib/tools/output-file-tool.js";
 import { createArtifactTool } from "../lib/tools/artifact-tool.js";
 import { createChannelTool } from "../lib/tools/channel-tool.js";
 import { createAskAgentTool } from "../lib/tools/ask-agent-tool.js";
@@ -27,10 +28,13 @@ import { createPinnedMemoryTools } from "../lib/tools/pinned-memory.js";
 import { createExperienceTools } from "../lib/tools/experience.js";
 import { createInstallSkillTool } from "../lib/tools/install-skill.js";
 import { createNotifyTool } from "../lib/tools/notify-tool.js";
-import { createDelegateTool } from "../lib/tools/delegate-tool.js";
+import { createUpdateSettingsTool } from "../lib/tools/update-settings-tool.js";
+import { createSubagentTool } from "../lib/tools/subagent-tool.js";
+import { createCheckDeferredTool } from "../lib/tools/check-deferred-tool.js";
 import { READ_ONLY_BUILTIN_TOOLS } from "./config-coordinator.js";
-import { formatSkillsForPrompt } from "@mariozechner/pi-coding-agent";
+import { formatSkillsForPrompt } from "../lib/pi-sdk/index.js";
 import { runCompatChecks } from "../lib/compat/index.js";
+import { getPlatformPromptNote } from "./platform-prompt.js";
 
 export class Agent {
   /**
@@ -78,16 +82,23 @@ export class Agent {
     this._memorySessionEnabled = true;  // per-session 开关（WelcomeScreen toggle）
     this._enabledSkills = [];
     this._systemPrompt = "";
+    this._descriptionRefreshHandler = null;
 
     // Desk 系统（与 memory 完全独立）
     this._deskManager = null;
     this._cronStore = null;
     this._cronTool = null;
-    this._presentFilesTool = null;
+    this._stageFilesTool = null;
     this._artifactTool = null;
     this._channelTool = null;
     this._browserTool = null;
     this._notifyTool = null;
+
+    /**
+     * 外部回调注入（由 AgentManager._createAgentInstance 填充）。
+     * Agent 不持有 Engine 引用，所有对 Engine 的需求通过此对象间接访问。
+     */
+    this._cb = null;
   }
 
   // ════════════════════════════
@@ -98,8 +109,9 @@ export class Agent {
    * 初始化助手：加载配置、编译记忆、创建工具
    * @param {(msg: string) => void} [log]
    * @param {object} [sharedModels] - 全局共享模型配置（由 engine 传入）
+   * @param {(bareId: string, agentConfig: object) => object} [resolveModel] - 统一模型解析回调
    */
-  async init(log = () => {}, sharedModels = {}) {
+  async init(log = () => {}, sharedModels = {}, resolveModel = null) {
     // 0. 兼容性检查（目录、数据库、配置文件）
     await runCompatChecks({
       agentDir: this.agentDir,
@@ -163,17 +175,51 @@ export class Agent {
 
     log(`  [agent] 4. FactStore + SummaryManager 完成`);
 
-    // utility 模型（允许为空，首次安装时用户尚未配置）
-    this._utilityModel = sharedModels.utility || null;
-    this._memoryModel = sharedModels.utility_large || null;
+    // utility 模型：用户未配置时 fallback 到聊天模型
+    const chatModelRef = this._config.models?.chat || null;
+    const userSetUtility = sharedModels.utility || null;
+    const userSetUtilityLarge = sharedModels.utility_large || null;
 
-    if (this._utilityModel && this._memoryModel) {
+    this._utilityModel = userSetUtility || chatModelRef;
+    this._memoryModel = userSetUtilityLarge || chatModelRef;
+
+    if (!userSetUtility && chatModelRef) {
+      console.log(`[agent] utility 模型未配置，使用聊天模型作为工具模型`);
+    }
+    if (!userSetUtilityLarge && chatModelRef) {
+      console.log(`[agent] utility_large 模型未配置，使用聊天模型作为记忆模型`);
+    }
+
+    // 预解析记忆模型凭证（统一解析层）
+    this._resolvedMemoryModel = null;
+    this._memoryModelUnavailableReason = null;
+    if (this._memoryModel && resolveModel) {
+      if (userSetUtilityLarge) {
+        // 用户明确配置了 utility_large：解析失败直接抛错，不兜底
+        this._resolvedMemoryModel = resolveModel(this._memoryModel, this._config);
+      } else {
+        // fallback 到聊天模型：解析失败则降级，不阻塞启动
+        try {
+          this._resolvedMemoryModel = resolveModel(this._memoryModel, this._config);
+        } catch (err) {
+          this._memoryModelUnavailableReason = err.message;
+          console.warn(`[memory] 聊天模型 fallback 解析失败，记忆系统暂不可用 — ${err.message}`);
+          this._cb?.emitDevLog?.(`记忆系统未启动：聊天模型 fallback 解析失败 — ${err.message}`, "warn");
+        }
+      }
+    } else if (!this._memoryModel) {
+      this._memoryModelUnavailableReason = "utility_large 未配置且无聊天模型可 fallback";
+      console.warn("[memory] 记忆系统未启动：utility_large 未配置且无聊天模型可 fallback");
+      this._cb?.emitDevLog?.("记忆系统未启动：未配置工具模型且无聊天模型可 fallback", "warn");
+    }
+
+    if (this._resolvedMemoryModel) {
       log(`  [agent] 4. memoryTicker...`);
       this._memoryTicker = createMemoryTicker({
         summaryManager: this._summaryManager,
         configPath: this.configPath,
         factStore: this._factStore,
-        getMemoryModel: () => this._memoryModel,
+        getResolvedMemoryModel: () => this._resolvedMemoryModel,
         getMemoryMasterEnabled: () => this._memoryMasterEnabled,
         isSessionMemoryEnabled: (sessionPath) => this.isSessionMemoryEnabledFor(sessionPath),
         onCompiled: () => {
@@ -224,12 +270,28 @@ export class Agent {
     );
     this._cronTool = createCronTool(this._cronStore, {
       getAutoApprove: () => this._config?.desk?.cron_auto_approve !== false,
+      confirmStore: this._cb?.getConfirmStore?.(),
+      emitEvent: (event) => this._cb?.emitEvent?.(event, this._cb?.getCurrentSessionPath?.()),
+      getSessionPath: () => this._cb?.getCurrentSessionPath?.(),
     });
-    this._presentFilesTool = createPresentFilesTool();
+    this._stageFilesTool = createStageFilesTool();
     this._artifactTool = createArtifactTool();
-    this._browserTool = createBrowserTool();
+    this._browserTool = createBrowserTool(() => this._cb?.getCurrentSessionPath?.());
     this._notifyTool = createNotifyTool({
       onNotify: (title, body) => this._notifyHandler?.(title, body),
+    });
+
+    this._checkDeferredTool = createCheckDeferredTool({
+      getDeferredStore: () => this._cb?.getDeferredResults?.(),
+      getSessionPath: () => this._cb?.getCurrentSessionPath?.(),
+    });
+
+    // 10. 设置修改工具
+    this._updateSettingsTool = createUpdateSettingsTool({
+      getEngine: () => this._cb?.getEngine?.(),
+      getConfirmStore: () => this._cb?.getConfirmStore?.(),
+      getSessionPath: () => this._cb?.getCurrentSessionPath?.(),
+      emitEvent: (event) => this._cb?.emitSessionEvent?.(event),
     });
 
     // 9. 频道工具 + 私信工具（需要 channelsDir 和 agentsDir）
@@ -243,11 +305,38 @@ export class Agent {
               try {
                 const raw = fs.readFileSync(path.join(this.agentsDir, e.name, "config.yaml"), "utf-8");
                 const nameMatch = raw.match(/^\s*name:\s*(.+)$/m);
-                return { id: e.name, name: nameMatch?.[1]?.trim() || e.name };
-              } catch { return { id: e.name, name: e.name }; }
+
+                // models.chat 可能是 string 或 { id, provider } 对象格式
+                let chatModel = "";
+                const chatObjMatch = raw.match(/^\s+chat:\s*\n\s+id:\s*(.+)$/m);
+                if (chatObjMatch) {
+                  chatModel = chatObjMatch[1].trim();
+                } else {
+                  const chatStrMatch = raw.match(/^\s+chat:\s+(\S.+)$/m);
+                  if (chatStrMatch) chatModel = chatStrMatch[1].trim();
+                }
+
+                // 读取 description.md（跳过 hash 注释行）
+                let summary = "";
+                try {
+                  const descRaw = fs.readFileSync(path.join(this.agentsDir, e.name, "description.md"), "utf-8");
+                  summary = descRaw.split("\n")
+                    .filter(l => !l.trim().startsWith("<!--"))
+                    .join("\n").trim();
+                } catch {}
+
+                return {
+                  id: e.name,
+                  name: nameMatch?.[1]?.trim() || e.name,
+                  summary,
+                  model: chatModel,
+                };
+              } catch { return { id: e.name, name: e.name, summary: "", model: "" }; }
             });
         } catch { return []; }
       };
+
+      this._listAgents = listAgents;
 
       this._channelTool = createChannelTool({
         channelsDir: this.channelsDir,
@@ -262,7 +351,9 @@ export class Agent {
       this._askAgentTool = createAskAgentTool({
         agentId,
         listAgents,
-        engine: this._engine,
+        engine: this._cb?.getEngine?.(),
+        getDeferredStore: () => this._cb?.getDeferredResults?.(),
+        getSessionPath: () => this._cb?.getCurrentSessionPath?.(),
       });
 
       this._dmTool = createDmTool({
@@ -276,28 +367,31 @@ export class Agent {
     // 10. install_skill 工具（需要 agentDir + config + engine.resolveUtilityConfig）
     this._installSkillTool = createInstallSkillTool({
       agentDir: this.agentDir,
+      getUserSkillsDir: () => this._cb?.getSkillsDir?.(),
       getConfig: () => {
         const cfg = { ...this._config };
         // learn_skills 从全局 preferences 注入（覆盖 agent config 中的值）
-        const globalLearn = this._engine?.getLearnSkills?.() || {};
+        const globalLearn = this._cb?.getLearnSkills?.() || {};
         if (!cfg.capabilities) cfg.capabilities = {};
         cfg.capabilities = { ...cfg.capabilities, learn_skills: globalLearn };
         return cfg;
       },
-      resolveUtilityConfig: () => this._engine?.resolveUtilityConfig?.(),
+      resolveUtilityConfig: () => this._cb?.resolveUtilityConfig?.(),
       onInstalled: async (skillName) => {
         await this._onInstallCallback?.(skillName);
       },
     });
 
-    // 11. delegate 工具（sub-agent 委派）
-    this._delegateTool = createDelegateTool({
+    // 11. subagent 工具
+    this._subagentTool = createSubagentTool({
       executeIsolated: (prompt, opts) => {
-        if (!this._engine) throw new Error("delegate 调用失败：engine 未初始化");
-        return this._engine.executeIsolated(prompt, opts);
+        if (!this._cb?.executeIsolated) throw new Error("subagent 调用失败：engine 未初始化");
+        return this._cb.executeIsolated(prompt, opts);
       },
-      resolveUtilityModel: () => this._memoryModel || this._utilityModel || null,
+      resolveUtilityModel: () => this._cb?.getCurrentModelId?.() || null,
       readOnlyBuiltinTools: READ_ONLY_BUILTIN_TOOLS,
+      getDeferredStore: () => this._cb?.getDeferredResults?.(),
+      getSessionPath: () => this._cb?.getCurrentSessionPath?.(),
     });
 
     // 12. 组装 system prompt
@@ -338,6 +432,19 @@ export class Agent {
   }
 
   // ════════════════════════════
+  //  外部回调 setter（统一入口，禁止外部直接赋值 _xxx）
+  // ════════════════════════════
+
+  setCallbacks(cb) { this._cb = cb; }
+  setGetOwnerIds(fn) { this._getOwnerIds = fn; }
+  setOnInstallCallback(fn) { this._onInstallCallback = fn; }
+  setNotifyHandler(fn) { this._notifyHandler = fn; }
+  setDescriptionRefreshHandler(fn) { this._descriptionRefreshHandler = fn; }
+  setDmSentHandler(fn) { this._dmSentHandler = fn; }
+  setChannelPostHandler(fn) { this._channelPostHandler = fn; }
+  setUtilityModel(val) { this._utilityModel = val; }
+
+  // ════════════════════════════
   //  状态访问
   // ════════════════════════════
 
@@ -354,6 +461,9 @@ export class Agent {
   get publicIshiki() { return this._readPublicIshiki(); }
   get utilityModel() { return this._utilityModel; }
   get memoryModel() { return this._memoryModel; }
+  get resolvedMemoryModel() { return this._resolvedMemoryModel; }
+  /** 记忆模型不可用的原因（null 表示可用） */
+  get memoryModelUnavailableReason() { return this._memoryModelUnavailableReason; }
   get summaryManager() { return this._summaryManager; }
   get memoryTicker() { return this._memoryTicker; }
   get tools() {
@@ -368,7 +478,7 @@ export class Agent {
       this._webFetchTool,
       this._todoTool,
       this._cronTool,
-      this._presentFilesTool,
+      this._stageFilesTool,
       this._artifactTool,
       this._channelTool,
       this._askAgentTool,
@@ -376,7 +486,9 @@ export class Agent {
       this._browserTool,
       this._installSkillTool,
       this._notifyTool,
-      this._delegateTool,
+      this._updateSettingsTool,
+      this._subagentTool,
+      this._checkDeferredTool,
     ].filter(Boolean);
   }
 
@@ -397,13 +509,9 @@ export class Agent {
   /** 查询指定 session 的持久化记忆开关，缺省视为开启 */
   isSessionMemoryEnabledFor(sessionPath) {
     if (!sessionPath) return this._memorySessionEnabled;
-    try {
-      const metaPath = path.join(this.sessionDir, "session-meta.json");
-      const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
-      return meta[path.basename(sessionPath)]?.memoryEnabled !== false;
-    } catch {
-      return true;
-    }
+    const metaPath = path.join(this.sessionDir, "session-meta.json");
+    const meta = safeReadJSON(metaPath, {});
+    return meta[path.basename(sessionPath)]?.memoryEnabled !== false;
   }
 
   /** 设置 agent 级别记忆总开关（同时重载 config 以获取 disabledSince/reenableAt） */
@@ -456,6 +564,11 @@ export class Agent {
 
     // 重建 system prompt
     this._systemPrompt = this.buildSystemPrompt();
+
+    // identity / ishiki / yuan 变化时刷新 description
+    if (partial.agent?.yuan) {
+      this._descriptionRefreshHandler?.();
+    }
   }
 
   // ════════════════════════════
@@ -469,7 +582,7 @@ export class Agent {
       .replace(/\{\{userName\}\}/g, this.userName)
       .replace(/\{\{agentName\}\}/g, this.agentName)
       .replace(/\{\{agentId\}\}/g, path.basename(this.agentDir));
-    const readFile = (p) => { try { return fs.readFileSync(p, "utf-8"); } catch { return ""; } };
+    const readFile = (p) => safeReadFile(p, "");
     const langDir = isZh ? "" : "en/";
     const yuanType = this._config?.agent?.yuan || "hanako";
     const identityMd = readFile(path.join(this.agentDir, "identity.md"))
@@ -489,14 +602,13 @@ export class Agent {
     const yuanType = this._config?.agent?.yuan || "hanako";
     const isZh = String(this._config.locale || "").startsWith("zh");
     const langDir = isZh ? "" : "en/";
-    const readFile = (p) => { try { return fs.readFileSync(p, "utf-8"); } catch { return ""; } };
-    return readFile(path.join(this.productDir, "yuan", `${langDir}${yuanType}.md`))
-      || readFile(path.join(this.productDir, "yuan", `${yuanType}.md`));
+    return safeReadFile(path.join(this.productDir, "yuan", `${langDir}${yuanType}.md`), "")
+      || safeReadFile(path.join(this.productDir, "yuan", `${yuanType}.md`), "");
   }
 
   /** 读取对外意识（public-ishiki.md），guest 会话使用 */
   _readPublicIshiki() {
-    const readFile = (p) => { try { return fs.readFileSync(p, "utf-8"); } catch { return ""; } };
+    const readFile = (p) => safeReadFile(p, "");
     const fill = (text) => text
       .replace(/\{\{userName\}\}/g, this.userName)
       .replace(/\{\{agentName\}\}/g, this.agentName)
@@ -515,9 +627,7 @@ export class Agent {
   buildSystemPrompt() {
     const isZh = String(this._config.locale || "").startsWith("zh");
 
-    const readFile = (filePath) => {
-      try { return fs.readFileSync(filePath, "utf-8"); } catch { return ""; }
-    };
+    const readFile = (filePath) => safeReadFile(filePath, "");
 
     // identity + yuan + ishiki（复用 personality getter）
     const yuanType = this._config?.agent?.yuan || "hanako";
@@ -533,6 +643,9 @@ export class Agent {
     const section = (title, content) => ["", "---", "", title, "", content];
 
     const parts = [
+      isZh
+        ? "你运行在 OpenHanako 平台上，由 liliMozi 开发。项目主页：https://github.com/liliMozi/openhanako"
+        : "You are running on the OpenHanako platform, developed by liliMozi. Project page: https://github.com/liliMozi/openhanako",
       ishiki,
       ...section(
         isZh ? "# 用户档案" : "# User Profile",
@@ -541,6 +654,13 @@ export class Agent {
           : "The following is the user's self-description, manually maintained by the user.\n\n" + userMd
       ),
     ];
+    const platformPrompt = getPlatformPromptNote({ platform: process.platform, isZh });
+    if (platformPrompt) {
+      parts.push(...section(
+        isZh ? "# 平台执行规则" : "# Platform Execution Rules",
+        platformPrompt
+      ));
+    }
     // 记忆整体开关：master && session 都开启才注入记忆相关 prompt
     if (this.memoryEnabled) {
       const memoryRule = isZh ? [
@@ -572,7 +692,7 @@ export class Agent {
         ));
       }
       const trimmedMemory = memory.trim();
-      if (trimmedMemory && trimmedMemory !== "（暂无记忆）") {
+      if (trimmedMemory && trimmedMemory !== "（暂无记忆）" && trimmedMemory !== "(No memory yet)") {
         parts.push(...section(
           isZh ? "# 记忆" : "# Memory",
           isZh
@@ -585,65 +705,37 @@ export class Agent {
     // Skills 注入（用 SDK 原版 formatSkillsForPrompt）
     if (this._enabledSkills?.length > 0) {
       parts.push(formatSkillsForPrompt(this._enabledSkills));
-      parts.push(isZh
-        ? "\n## 文件呈现规则\n\n" +
-          "当你为用户成功创建了文件（PDF、Word、Excel、PPT、Markdown 等）并确认写入磁盘后，" +
-          "必须立即调用 present_files 工具，在 filepaths 参数中传入文件的绝对路径数组，" +
-          "让用户可以在对话中直接打开文件。第一个路径应该是用户最想看到的文件。" +
-          "不要仅在文本里提及文件路径，要调用工具。"
-        : "\n## File Presentation Rules\n\n" +
-          "After successfully creating files (PDF, Word, Excel, PPT, Markdown, etc.) and confirming they are written to disk, " +
-          "you must immediately call the present_files tool, passing an array of absolute file paths in the filepaths parameter, " +
-          "so the user can open files directly from the conversation. The first path should be the file the user most wants to see. " +
-          "Don't just mention file paths in text — call the tool."
-      );
-      parts.push(isZh
-        ? "\n## Artifact 预览规则\n\n" +
-          "当你为用户生成 HTML 页面、交互式可视化、完整代码文件或长篇 Markdown 内容时，" +
-          "使用 create_artifact 工具，内容会在预览面板中渲染。\n" +
-          "适合用 artifact 的情况：可运行的 HTML/CSS/JS 页面、SVG 图表、完整代码文件、长篇格式化文档。\n" +
-          "不适合用 artifact 的情况：简短的文字回复、对话性回答、单行代码片段（直接在消息中展示即可）。"
-        : "\n## Artifact Preview Rules\n\n" +
-          "When generating HTML pages, interactive visualizations, complete code files, or long-form Markdown content, " +
-          "use the create_artifact tool — content will be rendered in the preview panel.\n" +
-          "Good for artifacts: runnable HTML/CSS/JS pages, SVG charts, complete code files, long formatted documents.\n" +
-          "Not for artifacts: short text replies, conversational answers, single-line code snippets (show directly in the message)."
-      );
-      parts.push(isZh
-        ? "\n## 浏览器使用规则\n\n" +
-          "你有一个浏览器工具（browser），可以打开网页、浏览、点击、输入。\n\n" +
-          "### 工具选择优先级（必须遵守）\n\n" +
-          "获取网页信息时，按以下顺序选择工具：\n" +
-          "1. **web_search** — 查找信息、获取 URL。大多数「帮我查一下 XX」的请求用这个就够了\n" +
-          "2. **web_fetch** — 已知 URL，需要提取页面文字内容。简单抓取必须用这个\n" +
-          "3. **browser** — 只在以下情况使用：页面需要登录/身份验证、需要填表或点击交互、web_fetch 返回的内容为空或不完整（JS 动态渲染页面）、需要查看页面视觉布局\n\n" +
-          "**禁止**在 web_search 或 web_fetch 能完成的场景下启动浏览器。浏览器启动成本高、会打开窗口干扰用户。\n\n" +
-          "### 浏览器操作规则\n\n" +
-          "1. 首次使用前必须调用 browser(action: \"start\") 启动浏览器\n" +
-          "2. 优先使用 snapshot 感知页面（文本格式，成本低），只在需要视觉布局信息时用 screenshot\n" +
-          "3. snapshot 返回的 [ref] 编号在页面变化后会失效。navigate、click 等操作会自动返回新的 snapshot，不需要手动再调 snapshot\n" +
-          "4. 如果需要点击或输入但 ref 已失效，先调用 snapshot 获取最新编号\n" +
-          "5. 用完浏览器后调用 browser(action: \"stop\") 关闭，避免资源浪费"
-        : "\n## Browser Usage Rules\n\n" +
-          "You have a browser tool that can open web pages, browse, click, and type.\n\n" +
-          "### Tool Selection Priority (mandatory)\n\n" +
-          "When fetching web information, choose tools in this order:\n" +
-          "1. **web_search** — Find information, get URLs. Most \"look up XX\" requests are handled by this alone\n" +
-          "2. **web_fetch** — Known URL, need to extract page text. Simple scraping must use this\n" +
-          "3. **browser** — Only use when: the page requires login/authentication, form filling or click interaction is needed, web_fetch returns empty or incomplete content (JS-rendered pages), or you need to see visual layout\n\n" +
-          "**Do not** launch the browser when web_search or web_fetch can do the job. Browser startup is expensive and opens a window that interrupts the user.\n\n" +
-          "### Browser Operation Rules\n\n" +
-          "1. Before first use, call browser(action: \"start\") to launch\n" +
-          "2. Prefer snapshot for page awareness (text format, low cost); only use screenshot when visual layout info is needed\n" +
-          "3. [ref] numbers from snapshot become invalid after page changes. navigate, click, etc. automatically return a new snapshot — no need to manually call snapshot again\n" +
-          "4. If you need to click or type but ref is stale, call snapshot first to get the latest numbers\n" +
-          "5. When done with the browser, call browser(action: \"stop\") to close and free resources"
-      );
     }
+
+    // 网页工具选择优先级（跨工具编排，工具 description 里放不下）
+    parts.push(isZh
+      ? "\n## 网页工具优先级\n\n" +
+        "获取网页信息时，按以下顺序选择工具：\n" +
+        "1. **web_search** — 查找信息、获取 URL。大多数「帮我查一下 XX」的请求用这个就够了\n" +
+        "2. **web_fetch** — 已知 URL，需要提取页面文字内容。简单抓取必须用这个\n" +
+        "3. **browser** — 只在以下情况使用：页面需要登录/身份验证、需要填表或点击交互、web_fetch 返回的内容为空或不完整（JS 动态渲染页面）、需要查看页面视觉布局\n\n" +
+        "**禁止**在 web_search 或 web_fetch 能完成的场景下启动浏览器。浏览器启动成本高、会打开窗口干扰用户。"
+      : "\n## Web Tool Priority\n\n" +
+        "When fetching web information, choose tools in this order:\n" +
+        "1. **web_search** — Find information, get URLs. Most \"look up XX\" requests are handled by this alone\n" +
+        "2. **web_fetch** — Known URL, need to extract page text. Simple scraping must use this\n" +
+        "3. **browser** — Only use when: the page requires login/authentication, form filling or click interaction is needed, web_fetch returns empty or incomplete content (JS-rendered pages), or you need to see visual layout\n\n" +
+        "**Do not** launch the browser when web_search or web_fetch can do the job. Browser startup is expensive and opens a window that interrupts the user."
+    );
+
+    // 设置工具路由
+    parts.push(isZh
+      ? "\n## 设置修改\n\n" +
+        "用户提到修改设置而未指明具体软件时，默认指本应用的设置。\n" +
+        "用户要求修改偏好设置（包括但不限于：外观主题、语言地区、模型选择、安全权限、记忆功能、个人信息、工作目录）时，使用 update_settings 工具。不要搜索网页，不要编辑配置文件。意图明确时直接 apply，不确定时先 search。"
+      : "\n## Settings Changes\n\n" +
+        "When the user mentions changing settings without specifying a particular application, assume they mean this application.\n" +
+        "When the user asks to change preferences (including but not limited to: appearance/theme, language/region, model selection, security/permissions, memory, personal info, working directory), use the update_settings tool. Do not search the web or edit config files. When intent is clear, apply directly; when unsure, search first."
+    );
 
     // 主动技能获取引导（仅在 allow_github_fetch 开启时注入）
     // learn_skills 从全局 preferences 读取
-    const learnCfg = this._engine?.getLearnSkills?.() || this._config?.capabilities?.learn_skills || {};
+    const learnCfg = this._cb?.getLearnSkills?.() || this._config?.capabilities?.learn_skills || {};
     if (learnCfg.enabled && learnCfg.allow_github_fetch) {
       parts.push(isZh
         ? "\n## 主动技能获取\n\n" +
@@ -677,15 +769,42 @@ export class Agent {
       );
     }
 
+    // 团队协作（仅当存在其他 agent 时注入）
+    if (this._listAgents) {
+      const myId = path.basename(this.agentDir);
+      const allAgents = this._listAgents();
+      const others = allAgents.filter(a => a.id !== myId);
+      if (others.length > 0) {
+        const roster = allAgents.map(a => {
+          const tag = a.id === myId ? "（你）" : "";
+          const model = a.model ? ` [${a.model}]` : "";
+          const desc = a.summary ? ` — ${a.summary}` : "";
+          return `- **${a.name}** (id: ${a.id})${tag}${model}${desc}`;
+        }).join("\n");
+        parts.push(isZh
+          ? `\n## 团队\n\n` +
+            `你不是独自工作。当前环境中有多个 agent，各有不同的专长和模型：\n\n${roster}\n\n` +
+            `遇到明显更适合其他 agent 专长的任务，或需要不同视角审核重要结论时，用 ask_agent 请求协助。` +
+            `先判断这件事自己做合不合适，再决定是否交出去。不确定找谁时传 \`agent="?"\` 查看详情。`
+          : `\n## Team\n\n` +
+            `You are not working alone. Multiple agents are available, each with different strengths and models:\n\n${roster}\n\n` +
+            `When a task clearly falls within another agent's expertise, or when an important conclusion would benefit from a different perspective, use ask_agent to request help. ` +
+            `Judge whether you're the best fit for the job before deciding to delegate. Pass \`agent="?"\` if unsure who to ask.`
+        );
+      }
+    }
+
     // 书桌 = 当前工作目录（注入实际路径）
-    const cwdPath = this._engine?.cwd || "";
+    const cwdPath = this._cb?.getCwd?.() || "";
     parts.push(isZh
       ? `\n## 书桌\n\n` +
         `用户所说的「书桌」「工作空间」指的是你当前的工作目录（cwd），不是系统桌面（~/Desktop）。` +
-        (cwdPath ? `\n当前工作目录：${cwdPath}` : "")
+        (cwdPath ? `\n当前工作目录：${cwdPath}` : "") +
+        `\n用户提到的文件、目录默认在当前工作目录下查找。找不到时再尝试主目录及其他常见位置。`
       : `\n## Desk\n\n` +
         `When the user says "desk" (书桌) or "workspace", they mean your current working directory (cwd), NOT the system Desktop (~/Desktop).` +
-        (cwdPath ? `\nCurrent working directory: ${cwdPath}` : "")
+        (cwdPath ? `\nCurrent working directory: ${cwdPath}` : "") +
+        `\nFiles and directories mentioned by the user should be searched in the current working directory first. Only look in the home directory or other common locations if not found.`
     );
 
     // 日期时间

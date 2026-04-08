@@ -12,10 +12,23 @@ export interface DocContextFile {
   name: string;
 }
 
+export interface QuotedSelection {
+  text: string;
+  sourceTitle: string;
+  sourceFilePath?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  charCount: number;
+}
+
 export interface InputSlice {
   attachedFiles: AttachedFile[];
+  /** 按 session path 存储的附件（权威源） */
+  attachedFilesBySession: Record<string, AttachedFile[]>;
   deskContextAttached: boolean;
   docContextAttached: boolean;
+  inputFocusTrigger: number;
+  quotedSelection: QuotedSelection | null;
   addAttachedFile: (file: AttachedFile) => void;
   removeAttachedFile: (index: number) => void;
   setAttachedFiles: (files: AttachedFile[]) => void;
@@ -24,14 +37,20 @@ export interface InputSlice {
   toggleDeskContext: () => void;
   setDocContextAttached: (attached: boolean) => void;
   toggleDocContext: () => void;
+  requestInputFocus: () => void;
+  setQuotedSelection: (sel: QuotedSelection) => void;
+  clearQuotedSelection: () => void;
 }
 
 export const createInputSlice = (
   set: (partial: Partial<InputSlice> | ((s: InputSlice) => Partial<InputSlice>)) => void
 ): InputSlice => ({
   attachedFiles: [],
+  attachedFilesBySession: {},
   deskContextAttached: false,
   docContextAttached: false,
+  inputFocusTrigger: 0,
+  quotedSelection: null,
   addAttachedFile: (file) =>
     set((s) => ({ attachedFiles: [...s.attachedFiles, file] })),
   removeAttachedFile: (index) =>
@@ -44,4 +63,8 @@ export const createInputSlice = (
   setDocContextAttached: (attached) => set({ docContextAttached: attached }),
   toggleDocContext: () =>
     set((s) => ({ docContextAttached: !s.docContextAttached })),
+  requestInputFocus: () =>
+    set((s) => ({ inputFocusTrigger: s.inputFocusTrigger + 1 })),
+  setQuotedSelection: (sel) => set({ quotedSelection: sel }),
+  clearQuotedSelection: () => set({ quotedSelection: null }),
 });

@@ -7,8 +7,17 @@ import { createAgentSlice, type AgentSlice } from './agent-slice';
 import { createChannelSlice, type ChannelSlice } from './channel-slice';
 import { createDeskSlice, type DeskSlice } from './desk-slice';
 import { createModelSlice, type ModelSlice } from './model-slice';
-import { createMiscSlice, type MiscSlice } from './misc-slice';
 import { createInputSlice, type InputSlice } from './input-slice';
+import { createChatSlice, type ChatSlice } from './chat-slice';
+import { createToastSlice, type ToastSlice } from './toast-slice';
+import { createArtifactSlice, type ArtifactSlice } from './artifact-slice';
+import { createBrowserSlice, type BrowserSlice } from './browser-slice';
+import { createContextSlice, type ContextSlice } from './context-slice';
+import { createAutomationSlice, type AutomationSlice } from './automation-slice';
+import { createActivitySlice, type ActivitySlice } from './activity-slice';
+import { createBridgeSlice, type BridgeSlice } from './bridge-slice';
+import { createPluginUiSlice, type PluginUiSlice } from './plugin-ui-slice';
+import { createSelectionSlice, type SelectionSlice } from './selection-slice';
 
 export type StoreState = ConnectionSlice &
   SessionSlice &
@@ -18,8 +27,17 @@ export type StoreState = ConnectionSlice &
   ChannelSlice &
   DeskSlice &
   ModelSlice &
-  MiscSlice &
-  InputSlice;
+  InputSlice &
+  ChatSlice &
+  ToastSlice &
+  ArtifactSlice &
+  BrowserSlice &
+  ContextSlice &
+  AutomationSlice &
+  ActivitySlice &
+  BridgeSlice &
+  PluginUiSlice &
+  SelectionSlice;
 
 export const useStore = create<StoreState>()((set, _get, _api) => ({
   ...createConnectionSlice(set),
@@ -28,10 +46,19 @@ export const useStore = create<StoreState>()((set, _get, _api) => ({
   ...createUiSlice(set),
   ...createAgentSlice(set),
   ...createChannelSlice(set),
-  ...createDeskSlice(set),
+  ...createDeskSlice(set, _get),
   ...createModelSlice(set),
-  ...createMiscSlice(set),
   ...createInputSlice(set),
+  ...createChatSlice(set, _get),
+  ...createToastSlice(set, _get),
+  ...createArtifactSlice(set),
+  ...createBrowserSlice(set),
+  ...createContextSlice(set),
+  ...createAutomationSlice(set),
+  ...createActivitySlice(set),
+  ...createBridgeSlice(set),
+  ...createPluginUiSlice(set),
+  ...createSelectionSlice(set),
 }));
 
 // Re-export slice types
@@ -44,6 +71,15 @@ export type {
   ChannelSlice,
   DeskSlice,
   ModelSlice,
-  MiscSlice,
   InputSlice,
+  ChatSlice,
+  ToastSlice,
+  ArtifactSlice,
+  BrowserSlice,
+  ContextSlice,
+  AutomationSlice,
+  ActivitySlice,
+  BridgeSlice,
+  PluginUiSlice,
+  SelectionSlice,
 };

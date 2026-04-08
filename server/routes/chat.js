@@ -4,10 +4,12 @@
  * 桥接 Pi SDK streaming 事件 → WebSocket 消息
  * 支持多 session 并发：后台 session 静默运行，只转发当前活跃 session 的事件
  */
-import { MoodParser, XingParser } from "../../core/events.js";
+import { Hono } from "hono";
+import { MoodParser, XingParser, ThinkTagParser, CardParser } from "../../core/events.js";
 import { wsSend, wsParse } from "../ws-protocol.js";
 import { debugLog } from "../../lib/debug-log.js";
 import { t } from "../i18n.js";
+import { getLastAssistantUsage } from "../../lib/pi-sdk/index.js";
 import { BrowserManager } from "../../lib/browser/browser-manager.js";
 import {
   createSessionStreamState,
@@ -16,9 +18,14 @@ import {
   appendSessionStreamEvent,
   resumeSessionStream,
 } from "../session-stream-store.js";
+import { AppError } from "../../shared/errors.js";
+import { errorBus } from "../../shared/error-bus.js";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
 
 /** tool_start 事件只广播这些 arg 字段，避免传输完整文件内容（同步维护：chat-render-shim.ts extractToolDetail） */
-const TOOL_ARG_SUMMARY_KEYS = ["file_path", "path", "command", "pattern", "url", "query"];
+const TOOL_ARG_SUMMARY_KEYS = ["file_path", "path", "command", "pattern", "url", "query", "key", "value", "action", "type", "schedule", "prompt", "label"];
 
 /**
  * 从 Pi SDK 的 content 块中提取纯文本
@@ -32,7 +39,10 @@ function extractText(content) {
     .join("");
 }
 
-export default async function chatRoute(app, { engine, hub }) {
+export function createChatRoute(engine, hub, { upgradeWebSocket }) {
+  const restRoute = new Hono();
+  const wsRoute = new Hono();
+
   let activeWsClients = 0;
   let disconnectAbortTimer = null;
   const DISCONNECT_ABORT_GRACE_MS = 15_000;
@@ -51,13 +61,10 @@ export default async function chatRoute(app, { engine, hub }) {
       disconnectAbortTimer = null;
       if (activeWsClients > 0) return;
 
-      const currentPath = engine.currentSessionPath;
-      if (!currentPath) return;
-
-      if (engine.isSessionStreaming(currentPath)) {
-        debugLog()?.log("ws", `no clients for ${DISCONNECT_ABORT_GRACE_MS}ms, abort streaming`);
-        engine.abortSessionByPath(currentPath).catch(() => {});
-      }
+      // 中断所有正在 streaming 的 owner session（焦点 + 后台）
+      for (const [, ss] of sessionState) ss.isAborted = true;
+      debugLog()?.log("ws", `no clients for ${DISCONNECT_ABORT_GRACE_MS}ms, aborting all streaming`);
+      engine.abortAllStreaming().catch(() => {});
     }, DISCONNECT_ABORT_GRACE_MS);
   }
 
@@ -76,9 +83,18 @@ export default async function chatRoute(app, { engine, hub }) {
         }
       }
       sessionState.set(sessionPath, {
+        thinkTagParser: new ThinkTagParser(),
         moodParser: new MoodParser(),
         xingParser: new XingParser(),
+        cardParser: new CardParser(),
+        _cardHints: [],
+        _cardEmitted: false,
         isThinking: false,
+        hasOutput: false,
+        hasToolCall: false,
+        hasThinking: false,
+        hasError: false,
+        isAborted: false,
         titleRequested: false,
         titlePreview: "",
         ...createSessionStreamState(),
@@ -114,14 +130,13 @@ export default async function chatRoute(app, { engine, hub }) {
 
   function emitStreamEvent(sessionPath, ss, event) {
     const entry = appendSessionStreamEvent(ss, event);
-    if (sessionPath === engine.currentSessionPath) {
-      broadcast({
-        ...event,
-        sessionPath,
-        streamId: entry.streamId,
-        seq: entry.seq,
-      });
-    }
+    // Phase 4: 始终广播所有事件，前端按 sessionPath 路由到对应 panel
+    broadcast({
+      ...event,
+      sessionPath,
+      streamId: entry.streamId,
+      seq: entry.seq,
+    });
     return entry;
   }
 
@@ -151,55 +166,100 @@ export default async function chatRoute(app, { engine, hub }) {
 
   // 单订阅：事件只写入一次，再按需广播到所有连接中的客户端。
   hub.subscribe((event, sessionPath) => {
+    // Non-session-scoped events: handle before session resolution
+    if (event.type === "plugin_ui_changed") {
+      broadcast({ type: "plugin_ui_changed" });
+      return;
+    }
+
     const isActive = sessionPath === engine.currentSessionPath;
     const ss = sessionPath ? getState(sessionPath) : null;
+
+    // Helper: feed CardParser, emit card events or pass text through as text_delta
+    const feedCardPipeline = (text) => {
+      ss.cardParser.feed(text, (cEvt) => {
+        switch (cEvt.type) {
+          case "text":
+            ss.titlePreview += cEvt.data || "";
+            emitStreamEvent(sessionPath, ss, { type: "text_delta", delta: cEvt.data });
+            maybeGenerateFirstTurnTitle(sessionPath, ss);
+            break;
+          case "card_start":
+            ss._cardEmitted = true;
+            emitStreamEvent(sessionPath, ss, { type: "card_start", attrs: cEvt.attrs });
+            break;
+          case "card_text":
+            emitStreamEvent(sessionPath, ss, { type: "card_text", delta: cEvt.data });
+            break;
+          case "card_end":
+            emitStreamEvent(sessionPath, ss, { type: "card_end" });
+            break;
+        }
+      });
+    };
 
     if (event.type === "message_update") {
       if (!ss) return;
       const sub = event.assistantMessageEvent?.type;
 
       if (sub === "text_delta") {
+        ss.hasOutput = true;
         if (ss.isThinking) {
           ss.isThinking = false;
           emitStreamEvent(sessionPath, ss, { type: "thinking_end" });
         }
 
         const delta = event.assistantMessageEvent.delta;
-        ss.moodParser.feed(delta, (evt) => {
-          switch (evt.type) {
+        // ThinkTagParser（最外层）→ MoodParser → XingParser
+        ss.thinkTagParser.feed(delta, (tEvt) => {
+          switch (tEvt.type) {
+            case "think_start":
+              emitStreamEvent(sessionPath, ss, { type: "thinking_start" });
+              break;
+            case "think_text":
+              emitStreamEvent(sessionPath, ss, { type: "thinking_delta", delta: tEvt.data });
+              break;
+            case "think_end":
+              emitStreamEvent(sessionPath, ss, { type: "thinking_end" });
+              break;
             case "text":
-              // text 透传到 XingParser 做二级拦截
-              ss.xingParser.feed(evt.data, (xEvt) => {
-                switch (xEvt.type) {
+              // 非 think 内容继续走 MoodParser → XingParser 链
+              ss.moodParser.feed(tEvt.data, (evt) => {
+                switch (evt.type) {
                   case "text":
-                    ss.titlePreview += xEvt.data || "";
-                    emitStreamEvent(sessionPath, ss, { type: "text_delta", delta: xEvt.data });
-                    maybeGenerateFirstTurnTitle(sessionPath, ss);
+                    ss.xingParser.feed(evt.data, (xEvt) => {
+                      switch (xEvt.type) {
+                        case "text":
+                          feedCardPipeline(xEvt.data);
+                          break;
+                        case "xing_start":
+                          emitStreamEvent(sessionPath, ss, { type: "xing_start", title: xEvt.title });
+                          break;
+                        case "xing_text":
+                          emitStreamEvent(sessionPath, ss, { type: "xing_text", delta: xEvt.data });
+                          break;
+                        case "xing_end":
+                          emitStreamEvent(sessionPath, ss, { type: "xing_end" });
+                          break;
+                      }
+                    });
                     break;
-                  case "xing_start":
-                    emitStreamEvent(sessionPath, ss, { type: "xing_start", title: xEvt.title });
+                  case "mood_start":
+                    emitStreamEvent(sessionPath, ss, { type: "mood_start" });
                     break;
-                  case "xing_text":
-                    emitStreamEvent(sessionPath, ss, { type: "xing_text", delta: xEvt.data });
+                  case "mood_text":
+                    emitStreamEvent(sessionPath, ss, { type: "mood_text", delta: evt.data });
                     break;
-                  case "xing_end":
-                    emitStreamEvent(sessionPath, ss, { type: "xing_end" });
+                  case "mood_end":
+                    emitStreamEvent(sessionPath, ss, { type: "mood_end" });
                     break;
                 }
               });
               break;
-            case "mood_start":
-              emitStreamEvent(sessionPath, ss, { type: "mood_start" });
-              break;
-            case "mood_text":
-              emitStreamEvent(sessionPath, ss, { type: "mood_text", delta: evt.data });
-              break;
-            case "mood_end":
-              emitStreamEvent(sessionPath, ss, { type: "mood_end" });
-              break;
           }
         });
       } else if (sub === "thinking_delta") {
+        ss.hasThinking = true;
         if (!ss.isThinking) {
           ss.isThinking = true;
           emitStreamEvent(sessionPath, ss, { type: "thinking_start" });
@@ -211,10 +271,12 @@ export default async function chatRoute(app, { engine, hub }) {
       } else if (sub === "toolcall_start") {
         // 不在这里关闭 thinking 状态
       } else if (sub === "error") {
-        if (isActive) broadcast({ type: "error", message: event.assistantMessageEvent.error || "Unknown error" });
+        ss.hasError = true;
+        if (isActive) broadcast({ type: "error", message: event.assistantMessageEvent.error || "Unknown error", sessionPath });
       }
     } else if (event.type === "tool_execution_start") {
       if (!ss) return;
+      ss.hasToolCall = true;
       if (ss.isThinking) {
         ss.isThinking = false;
         emitStreamEvent(sessionPath, ss, { type: "thinking_end" });
@@ -236,7 +298,17 @@ export default async function chatRoute(app, { engine, hub }) {
         details: event.result?.details,
       });
 
-      if (event.toolName === "present_files") {
+      // Plugin Card: emit directly (same pattern as file_output)
+      if (event.result?.details?.card) {
+        const c = event.result.details.card;
+        emitStreamEvent(sessionPath, ss, {
+          type: "plugin_card",
+          card: { ...c, type: c.type || "iframe", pluginId: c.pluginId || "" },
+        });
+      }
+
+      // COMPAT(v0.78): present_files → stage_files, remove after v0.90
+      if (event.toolName === "stage_files" || event.toolName === "present_files") {
         const details = event.result?.details || {};
         const files = details.files || [];
         if (files.length === 0 && details.filePath) {
@@ -268,11 +340,11 @@ export default async function chatRoute(app, { engine, hub }) {
         const d = event.result?.details || {};
         if (d.action === "screenshot" && event.result?.content) {
           const imgBlock = event.result.content.find(c => c.type === "image");
-          if (imgBlock?.source?.data) {
+          if (imgBlock?.data) {
             emitStreamEvent(sessionPath, ss, {
               type: "browser_screenshot",
-              base64: imgBlock.source.data,
-              mimeType: imgBlock.source.media_type || "image/jpeg",
+              base64: imgBlock.data,
+              mimeType: imgBlock.mimeType || "image/jpeg",
             });
           }
         }
@@ -303,24 +375,118 @@ export default async function chatRoute(app, { engine, hub }) {
     } else if (event.type === "devlog") {
       broadcast({ type: "devlog", text: event.text, level: event.level });
     } else if (event.type === "browser_bg_status") {
-      broadcast({ type: "browser_bg_status", running: event.running, url: event.url });
+      broadcast({ type: "browser_bg_status", running: event.running, url: event.url, sessionPath });
+    } else if (event.type === "cron_confirmation" && event.confirmId) {
+      // 新的阻塞式 cron 确认（通过 emitEvent 触发）
+      if (!ss) return;
+      emitStreamEvent(sessionPath, ss, {
+        type: "cron_confirmation",
+        confirmId: event.confirmId,
+        jobData: event.jobData,
+      });
+    } else if (event.type === "settings_confirmation") {
+      if (!ss) return;
+      emitStreamEvent(sessionPath, ss, {
+        type: "settings_confirmation",
+        confirmId: event.confirmId,
+        settingKey: event.settingKey,
+        cardType: event.cardType,
+        currentValue: event.currentValue,
+        proposedValue: event.proposedValue,
+        options: event.options,
+        optionLabels: event.optionLabels || null,
+        label: event.label,
+        description: event.description,
+        frontend: event.frontend,
+      });
+    } else if (event.type === "confirmation_resolved") {
+      broadcast({
+        type: "confirmation_resolved",
+        confirmId: event.confirmId,
+        action: event.action,
+        value: event.value,
+      });
+    } else if (event.type === "apply_frontend_setting") {
+      broadcast({
+        type: "apply_frontend_setting",
+        key: event.key,
+        value: event.value,
+      });
     } else if (event.type === "activity_update") {
       broadcast({ type: "activity_update", activity: event.activity });
+    } else if (event.type === "bridge_message") {
+      broadcast({ type: "bridge_message", message: event.message });
+    } else if (event.type === "bridge_status") {
+      broadcast({ type: "bridge_status", platform: event.platform, status: event.status, error: event.error });
+    } else if (event.type === "plan_mode") {
+      broadcast({ type: "plan_mode", enabled: event.enabled, sessionPath });
     } else if (event.type === "notification") {
       broadcast({ type: "notification", title: event.title, body: event.body });
     } else if (event.type === "channel_new_message") {
       broadcast({ type: "channel_new_message", channelName: event.channelName, sender: event.sender });
     } else if (event.type === "dm_new_message") {
       broadcast({ type: "dm_new_message", from: event.from, to: event.to });
+    } else if (event.type === "message_end") {
+      // Provider 级别错误（超时、连接断开等）通过 message_end 传递，不经过 message_update
+      if (!ss) return;
+      if (event.message?.stopReason === "error") {
+        ss.hasError = true;
+        if (isActive) {
+          broadcast({ type: "error", message: event.message.errorMessage || "Unknown error", sessionPath });
+        }
+      }
     } else if (event.type === "turn_end") {
       if (!ss) return;
+      // 关闭结构化 thinking（如有）——必须在 flush 之前，否则前端收不到 thinking_end
+      if (ss.isThinking) {
+        ss.isThinking = false;
+        emitStreamEvent(sessionPath, ss, { type: "thinking_end" });
+      }
+      // flush 顺序：ThinkTag → Mood → Xing（和 feed 顺序一致）
+      // flush 内部的 mood → xing 管线（thinkTag flush 和 mood flush 共用）
+      const feedMoodPipeline = (text) => {
+        ss.moodParser.feed(text, (evt) => {
+          if (evt.type === "text") {
+            ss.xingParser.feed(evt.data, (xEvt) => {
+              switch (xEvt.type) {
+                case "text":
+                  feedCardPipeline(xEvt.data);
+                  break;
+                case "xing_start":
+                  emitStreamEvent(sessionPath, ss, { type: "xing_start", title: xEvt.title });
+                  break;
+                case "xing_text":
+                  emitStreamEvent(sessionPath, ss, { type: "xing_text", delta: xEvt.data });
+                  break;
+                case "xing_end":
+                  emitStreamEvent(sessionPath, ss, { type: "xing_end" });
+                  break;
+              }
+            });
+          } else if (evt.type === "mood_start") {
+            emitStreamEvent(sessionPath, ss, { type: "mood_start" });
+          } else if (evt.type === "mood_text") {
+            emitStreamEvent(sessionPath, ss, { type: "mood_text", delta: evt.data });
+          } else if (evt.type === "mood_end") {
+            emitStreamEvent(sessionPath, ss, { type: "mood_end" });
+          }
+        });
+      };
+      ss.thinkTagParser.flush((tEvt) => {
+        if (tEvt.type === "think_text") {
+          emitStreamEvent(sessionPath, ss, { type: "thinking_delta", delta: tEvt.data });
+        } else if (tEvt.type === "think_end") {
+          emitStreamEvent(sessionPath, ss, { type: "thinking_end" });
+        } else if (tEvt.type === "text") {
+          feedMoodPipeline(tEvt.data);
+        }
+      });
       ss.moodParser.flush((evt) => {
         if (evt.type === "text") {
-          // flush 的 text 也要过 xingParser
           ss.xingParser.feed(evt.data, (xEvt) => {
             switch (xEvt.type) {
               case "text":
-                emitStreamEvent(sessionPath, ss, { type: "text_delta", delta: xEvt.data });
+                feedCardPipeline(xEvt.data);
                 break;
               case "xing_start":
                 emitStreamEvent(sessionPath, ss, { type: "xing_start", title: xEvt.title });
@@ -339,168 +505,337 @@ export default async function chatRoute(app, { engine, hub }) {
       });
       ss.xingParser.flush((xEvt) => {
         if (xEvt.type === "text") {
-          emitStreamEvent(sessionPath, ss, { type: "text_delta", delta: xEvt.data });
+          feedCardPipeline(xEvt.data);
         } else if (xEvt.type === "xing_text") {
           emitStreamEvent(sessionPath, ss, { type: "xing_text", delta: xEvt.data });
         }
       });
+      ss.cardParser.flush((cEvt) => {
+        if (cEvt.type === "text") {
+          emitStreamEvent(sessionPath, ss, { type: "text_delta", delta: cEvt.data });
+        } else if (cEvt.type === "card_text") {
+          emitStreamEvent(sessionPath, ss, { type: "card_text", delta: cEvt.data });
+        } else if (cEvt.type === "card_start") {
+          ss._cardEmitted = true;
+          emitStreamEvent(sessionPath, ss, { type: "card_start", attrs: cEvt.attrs });
+        } else if (cEvt.type === "card_end") {
+          emitStreamEvent(sessionPath, ss, { type: "card_end" });
+        }
+      });
+
+
+      // 空回复检测：本轮没有文本输出也没有工具调用，提示用户检查配置
+      // 被 abort 的 turn 不弹此提示（用户主动停止 / WS 断开 / 连接超时）
+      if (!ss.hasOutput && !ss.hasToolCall && !ss.hasThinking && !ss.hasError && !ss.isAborted && isActive) {
+        broadcast({ type: "error", message: t("error.modelNoResponse"), sessionPath });
+      }
+
+      // ── token usage 事件（供插件监听做用量统计）──
+      try {
+        const sess = engine.getSessionByPath(sessionPath);
+        if (sess) {
+          const usage = getLastAssistantUsage(sess.entries ?? []);
+          if (usage) {
+            const model = sess.model;
+            hub.eventBus.emit({
+              type: "token_usage",
+              usage,
+              modelId: model?.id ?? null,
+              modelProvider: model?.provider ?? null,
+            }, sessionPath);
+          }
+        }
+      } catch (_) { /* 统计失败不阻塞主流程 */ }
 
       emitStreamEvent(sessionPath, ss, { type: "turn_end" });
       finishSessionStream(ss);
-      ss.isThinking = false;
+      ss.hasOutput = false;
+      ss.hasToolCall = false;
+      ss.hasThinking = false;
+      ss.hasError = false;
+      ss.isAborted = false;
+      ss.thinkTagParser.reset();
       ss.moodParser.reset();
       ss.xingParser.reset();
+      ss.cardParser.reset();
+      ss._cardHints = [];
+      ss._cardEmitted = false;
 
-      if (isActive) {
-        debugLog()?.log("ws", "assistant reply done");
-        maybeGenerateFirstTurnTitle(sessionPath, ss);
-      }
+      if (isActive) debugLog()?.log("ws", "assistant reply done");
+      maybeGenerateFirstTurnTitle(sessionPath, ss);
+    } else if (event.type === "auto_compaction_start") {
+      broadcast({ type: "compaction_start", sessionPath });
+    } else if (event.type === "auto_compaction_end") {
+      const s = engine.getSessionByPath(sessionPath);
+      const usage = s?.getContextUsage?.();
+      broadcast({
+        type: "compaction_end",
+        sessionPath,
+        tokens: usage?.tokens ?? null,
+        contextWindow: usage?.contextWindow ?? null,
+        percent: usage?.percent ?? null,
+      });
+    } else if (event.type === "deferred_result") {
+      if (!ss) return;
+      emitStreamEvent(sessionPath, ss, {
+        type: "deferred_result",
+        taskId: event.taskId,
+        status: event.status,
+        result: event.result,
+        reason: event.reason,
+        meta: event.meta,
+      });
     }
   });
 
-  app.get("/ws", { websocket: true }, (socket, req) => {
-    const ws = socket;
-    let closed = false;
-    activeWsClients++;
-    clients.add(ws);
-    cancelDisconnectAbort();
-    debugLog()?.log("ws", "client connected");
+  // ── WebSocket 路由（挂载在 wsRoute，由 index.js 挂到根路径） ──
 
-    // 注意：token 校验由 server/index.js 的 onRequest hook 统一处理，
-    // Fastify @fastify/websocket 的 WS 升级请求也会经过该 hook
+  wsRoute.get("/ws",
+    upgradeWebSocket((c) => {
+      let closed = false;
 
-    // 处理客户端消息
-    ws.on("message", async (raw) => {
-      const msg = wsParse(raw);
-      if (!msg) return;
+      return {
+        onOpen(event, ws) {
+          activeWsClients++;
+          clients.add(ws);
+          cancelDisconnectAbort();
+          debugLog()?.log("ws", "client connected");
+        },
 
-      if (msg.type === "abort") {
-        if (engine.isStreaming) {
-          try { await hub.abort(); } catch {}
-        }
-        return;
-      }
+        onMessage(event, ws) {
+          // Hono @hono/node-ws delivers event.data as a string for text frames
+          const msg = wsParse(event.data);
+          if (!msg) return;
 
-      if (msg.type === "steer" && msg.text) {
-        debugLog()?.log("ws", `steer (${msg.text.length} chars)`);
-        if (engine.steer(msg.text)) {
-          wsSend(ws, { type: "steered" });
-          return;
-        }
-        // agent 已停止，降级为正常 prompt（下面的 prompt 分支会处理）
-        debugLog()?.log("ws", `steer missed, falling back to prompt`);
-        msg.type = "prompt";
-      }
-
-      // session 切回时，前端请求补发离屏期间的流式内容
-      if (msg.type === "resume_stream") {
-        const currentPath = msg.sessionPath || engine.currentSessionPath;
-        const ss = sessionState.get(currentPath);
-        if (ss) {
-          const resumed = resumeSessionStream(ss, {
-            streamId: msg.streamId,
-            sinceSeq: msg.sinceSeq,
-          });
-          wsSend(ws, {
-            type: "stream_resume",
-            sessionPath: currentPath,
-            streamId: resumed.streamId,
-            sinceSeq: resumed.sinceSeq,
-            nextSeq: resumed.nextSeq,
-            reset: resumed.reset,
-            truncated: resumed.truncated,
-            isStreaming: resumed.isStreaming,
-            events: resumed.events,
-          });
-        } else {
-          wsSend(ws, {
-            type: "stream_resume",
-            sessionPath: currentPath,
-            streamId: null,
-            sinceSeq: Number.isFinite(msg.sinceSeq) ? Math.max(0, msg.sinceSeq) : 0,
-            nextSeq: 1,
-            reset: false,
-            truncated: false,
-            isStreaming: false,
-            events: [],
-          });
-        }
-        return;
-      }
-
-      if (msg.type === "prompt" && (msg.text || msg.images?.length)) {
-        // 图片校验：最多 10 张，单张 ≤ 20MB，仅允许常见图片 MIME
-        if (msg.images?.length) {
-          const ALLOWED_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-          const MAX_IMAGES = 10;
-          const MAX_BYTES = 20 * 1024 * 1024; // 20MB base64 ≈ 15MB 原始
-          if (msg.images.length > MAX_IMAGES) {
-            wsSend(ws, { type: "error", message: `最多支持 ${MAX_IMAGES} 张图片` });
-            return;
-          }
-          for (const img of msg.images) {
-            if (!img?.mimeType || !ALLOWED_MIME.has(img.mimeType)) {
-              wsSend(ws, { type: "error", message: `不支持的图片格式: ${img?.mimeType || "unknown"}` });
+          // Wrap the async handler with error handling (replaces wrapWsHandler)
+          (async () => {
+            if (msg.type === "abort") {
+              const abortPath = msg.sessionPath || engine.currentSessionPath;
+              const abortSs = getState(abortPath);
+              if (abortSs) abortSs.isAborted = true;
+              if (engine.isSessionStreaming(abortPath)) {
+                try { await hub.abort(abortPath); } catch {}
+              }
               return;
             }
-            if (img.data && img.data.length > MAX_BYTES) {
-              wsSend(ws, { type: "error", message: "单张图片不得超过 20MB" });
+
+            if (msg.type === "steer" && msg.text) {
+              debugLog()?.log("ws", `steer (${msg.text.length} chars)`);
+              const steerPath = msg.sessionPath || engine.currentSessionPath;
+              if (engine.steerSession(steerPath, msg.text)) {
+                wsSend(ws, { type: "steered" });
+                return;
+              }
+              // agent 已停止，降级为正常 prompt（下面的 prompt 分支会处理）
+              debugLog()?.log("ws", `steer missed, falling back to prompt`);
+              msg.type = "prompt";
+            }
+
+            // session 切回时，前端请求补发离屏期间的流式内容
+            if (msg.type === "resume_stream") {
+              const currentPath = msg.sessionPath || engine.currentSessionPath;
+              const ss = sessionState.get(currentPath);
+              if (ss) {
+                const resumed = resumeSessionStream(ss, {
+                  streamId: msg.streamId,
+                  sinceSeq: msg.sinceSeq,
+                });
+                wsSend(ws, {
+                  type: "stream_resume",
+                  sessionPath: currentPath,
+                  streamId: resumed.streamId,
+                  sinceSeq: resumed.sinceSeq,
+                  nextSeq: resumed.nextSeq,
+                  reset: resumed.reset,
+                  truncated: resumed.truncated,
+                  isStreaming: resumed.isStreaming,
+                  events: resumed.events,
+                });
+              } else {
+                wsSend(ws, {
+                  type: "stream_resume",
+                  sessionPath: currentPath,
+                  streamId: null,
+                  sinceSeq: Number.isFinite(msg.sinceSeq) ? Math.max(0, msg.sinceSeq) : 0,
+                  nextSeq: 1,
+                  reset: false,
+                  truncated: false,
+                  isStreaming: false,
+                  events: [],
+                });
+              }
               return;
             }
-          }
-        }
-        debugLog()?.log("ws", `user message (${(msg.text || "").length} chars, ${msg.images?.length || 0} images)`);
-        // 只检查当前活跃 session 是否在 streaming
-        if (engine.isStreaming) {
-          wsSend(ws, { type: "error", message: t("error.stillStreaming", { name: engine.agentName }) });
-          return;
-        }
-        const promptSessionPath = engine.currentSessionPath;
-        const ss = getState(promptSessionPath);
-        try {
-          ss.moodParser.reset();
-          ss.xingParser.reset();
-          ss.titleRequested = false;
-          ss.titlePreview = "";
-          beginSessionStream(ss);
-          broadcast({ type: "status", isStreaming: true });
-          await hub.send(msg.text || "", msg.images ? { images: msg.images } : undefined);
-          // prompt 完成时，只有仍在活跃 session 才发 status:false
-          if (engine.currentSessionPath === promptSessionPath) {
-            broadcast({ type: "status", isStreaming: false });
-          }
-        } catch (err) {
-          if (!err.message?.includes("aborted")) {
-            wsSend(ws, { type: "error", message: err.message });
-          }
-          if (engine.currentSessionPath === promptSessionPath) {
-            broadcast({ type: "status", isStreaming: false });
-          }
-        }
-      }
-    });
 
-    ws.on("error", (err) => {
-      console.error("[ws] error:", err.message);
-      debugLog()?.error("ws", err.message);
-    });
+            if (msg.type === "context_usage") {
+              const usagePath = msg.sessionPath || engine.currentSessionPath;
+              const usageSession = engine.getSessionByPath(usagePath);
+              const usage = usageSession?.getContextUsage?.();
+              wsSend(ws, {
+                type: "context_usage",
+                sessionPath: usagePath,
+                tokens: usage?.tokens ?? null,
+                contextWindow: usage?.contextWindow ?? null,
+                percent: usage?.percent ?? null,
+              });
+              return;
+            }
 
-    // 清理：WS 断开时只中断前台 session（后台 channel triage / cron 不受影响）
-    ws.on("close", () => {
-      if (closed) return;
-      closed = true;
-      activeWsClients = Math.max(0, activeWsClients - 1);
-      clients.delete(ws);
-      debugLog()?.log("ws", "client disconnected");
-      scheduleDisconnectAbort();
-      // 无活跃客户端时，清理非流式 session 状态（防止 Map 无限增长）
-      if (activeWsClients === 0) {
-        for (const [sp, ss] of sessionState) {
-          if (!ss.isStreaming) sessionState.delete(sp);
-        }
-      }
-    });
-  });
+            if (msg.type === "compact") {
+              const compactPath = msg.sessionPath || engine.currentSessionPath;
+              const session = engine.getSessionByPath(compactPath);
+              if (!session) {
+                wsSend(ws, { type: "error", message: t("error.noActiveSession"), sessionPath: compactPath });
+                return;
+              }
+              if (session.isCompacting) {
+                wsSend(ws, { type: "error", message: t("error.compacting"), sessionPath: compactPath });
+                return;
+              }
+              if (engine.isSessionStreaming(compactPath)) {
+                wsSend(ws, { type: "error", message: t("error.waitForReply"), sessionPath: compactPath });
+                return;
+              }
+              broadcast({ type: "compaction_start", sessionPath: compactPath });
+              try {
+                await session.compact();
+                const usage = session.getContextUsage?.();
+                broadcast({
+                  type: "compaction_end",
+                  sessionPath: compactPath,
+                  tokens: usage?.tokens ?? null,
+                  contextWindow: usage?.contextWindow ?? null,
+                  percent: usage?.percent ?? null,
+                });
+              } catch (err) {
+                const errMsg = err.message || "";
+                if (errMsg.includes("Already compacted") || errMsg.includes("Nothing to compact")) {
+                  broadcast({ type: "compaction_end", sessionPath: compactPath });
+                } else {
+                  broadcast({ type: "compaction_end", sessionPath: compactPath });
+                  wsSend(ws, { type: "error", message: t("error.compactFailed", { msg: errMsg }), sessionPath: compactPath });
+                }
+              }
+              return;
+            }
+
+            if (msg.type === "prompt" && (msg.text || msg.images?.length)) {
+              // 图片校验：最多 10 张，单张 ≤ 20MB，仅允许常见图片 MIME
+              if (msg.images?.length) {
+                const ALLOWED_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+                const MAX_IMAGES = 10;
+                const MAX_BYTES = 20 * 1024 * 1024; // 20MB base64 ≈ 15MB 原始
+                if (msg.images.length > MAX_IMAGES) {
+                  wsSend(ws, { type: "error", message: t("error.maxImages", { max: MAX_IMAGES }), sessionPath: msg.sessionPath });
+                  return;
+                }
+                for (const img of msg.images) {
+                  if (!img?.mimeType || !ALLOWED_MIME.has(img.mimeType)) {
+                    wsSend(ws, { type: "error", message: t("error.unsupportedImageFormat", { mime: img?.mimeType || "unknown" }), sessionPath: msg.sessionPath });
+                    return;
+                  }
+                  if (img.data && img.data.length > MAX_BYTES) {
+                    wsSend(ws, { type: "error", message: t("error.imageTooLarge"), sessionPath: msg.sessionPath });
+                    return;
+                  }
+                }
+              }
+              // 将用户上传的图片持久化到本地，以便工具（如图生图）引用
+              const savedImagePaths = [];
+              if (msg.images?.length && engine.hanakoHome) {
+                const attachDir = path.join(engine.hanakoHome, "attachments");
+                fs.mkdirSync(attachDir, { recursive: true });
+                for (const img of msg.images) {
+                  const ext = (img.mimeType || "image/png").split("/")[1] || "png";
+                  const hash = crypto.createHash("md5").update(img.data.slice(0, 1024)).digest("hex").slice(0, 8);
+                  const filePath = path.join(attachDir, `upload-${Date.now()}-${hash}.${ext}`);
+                  fs.writeFileSync(filePath, Buffer.from(img.data, "base64"));
+                  savedImagePaths.push(filePath);
+                }
+              }
+
+              // 非 vision 模型：静默剥离图片，只发文字。不拦截、不报错。
+              // vision 未知（undefined）的模型：放行，让 API 决定。
+              const curModel = engine.activeSessionModel ?? engine.currentModel;
+              if (msg.images?.length && curModel?.vision === false) {
+                msg.images = undefined;
+              }
+              // 只发图片没文字时补一个占位文本，防止空 text 导致某些 API 异常
+              let promptText = msg.text || "";
+              // 在消息文本前附注图片本地路径，供工具（如图生图）引用
+              if (savedImagePaths.length) {
+                const pathNote = savedImagePaths.map(p => `[attached_image: ${p}]`).join("\n");
+                promptText = `${pathNote}\n${promptText}`;
+              }
+              // Skill invocation tags
+              if (msg.skills?.length) {
+                const skillNote = msg.skills.map(s => `[Use skill: ${s}]`).join('\n');
+                promptText = `${skillNote}\n${promptText}`;
+              }
+              if (!promptText.trim() && msg.images?.length) {
+                promptText = t("error.viewImage");
+              }
+              debugLog()?.log("ws", `user message (${promptText.length} chars, ${msg.images?.length || 0} images)`);
+              // Phase 2: 客户端可指定 sessionPath，否则用焦点 session
+              const promptSessionPath = msg.sessionPath || engine.currentSessionPath;
+              if (engine.isSessionStreaming(promptSessionPath)) {
+                wsSend(ws, { type: "error", message: t("error.stillStreaming", { name: engine.agentName }), sessionPath: promptSessionPath });
+                return;
+              }
+              const ss = getState(promptSessionPath);
+              try {
+                ss.thinkTagParser.reset();
+                ss.moodParser.reset();
+                ss.xingParser.reset();
+                ss.isAborted = false;
+                ss.titleRequested = false;
+                ss.titlePreview = "";
+                beginSessionStream(ss);
+                broadcast({ type: "status", isStreaming: true, sessionPath: promptSessionPath });
+                await hub.send(promptText, msg.images ? { images: msg.images, sessionPath: promptSessionPath } : { sessionPath: promptSessionPath });
+                broadcast({ type: "status", isStreaming: false, sessionPath: promptSessionPath });
+              } catch (err) {
+                if (!err.message?.includes("aborted")) {
+                  wsSend(ws, { type: "error", message: err.message, sessionPath: promptSessionPath });
+                }
+                broadcast({ type: "status", isStreaming: false, sessionPath: promptSessionPath });
+              }
+            }
+          })().catch((err) => {
+            const appErr = AppError.wrap(err);
+            errorBus.report(appErr, { context: { wsMessageType: msg.type } });
+            if (!appErr.message?.includes('aborted')) {
+              wsSend(ws, { type: 'error', message: appErr.message || 'Unknown error', error: appErr.toJSON(), sessionPath: msg.sessionPath });
+            }
+          });
+        },
+
+        onError(event, ws) {
+          const err = event.error || event;
+          console.error("[ws] error:", err.message || err);
+          debugLog()?.error("ws", err.message || String(err));
+        },
+
+        // 清理：WS 断开时只中断前台 session（后台 channel triage / cron 不受影响）
+        onClose(event, ws) {
+          if (closed) return;
+          closed = true;
+          activeWsClients = Math.max(0, activeWsClients - 1);
+          clients.delete(ws);
+          debugLog()?.log("ws", "client disconnected");
+          scheduleDisconnectAbort();
+          // 无活跃客户端时，清理非流式 session 状态（防止 Map 无限增长）
+          if (activeWsClients === 0) {
+            for (const [sp, ss] of sessionState) {
+              if (!ss.isStreaming) sessionState.delete(sp);
+            }
+          }
+        },
+      };
+    })
+  );
+
+  return { restRoute, wsRoute };
 }
 
 /**
@@ -527,11 +862,8 @@ async function generateSessionTitle(engine, notify, opts = {}) {
     const assistantText = (opts.assistantTextHint || extractText(assistantMsg?.content)).trim();
     if (!userText || !assistantText) return false;
 
-    const TITLE_TIMEOUT = 15_000; // 15 秒超时
-    let title = await Promise.race([
-      engine.summarizeTitle(userText, assistantText),
-      new Promise(resolve => setTimeout(() => resolve(null), TITLE_TIMEOUT)),
-    ]);
+    // 超时由 callText 内部的 AbortSignal 统一控制：超时即取消 Pi SDK 连接，无空跑
+    let title = await engine.summarizeTitle(userText, assistantText, { timeoutMs: 15_000 });
 
     // API 失败时，用用户第一条消息截取作为 fallback 标题
     if (!title) {

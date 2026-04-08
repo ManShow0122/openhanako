@@ -12,41 +12,52 @@ import fs from "fs";
 import { setMaxListeners } from "events";
 import os from "os";
 import path from "path";
-import { fileURLToPath } from "url";
-import Fastify from "fastify";
-import websocket from "@fastify/websocket";
+import { Hono } from "hono";
+import { serve } from "@hono/node-server";
+import { createNodeWebSocket } from "@hono/node-ws";
+import { WebSocketServer } from "ws";
+import { AppError } from "../shared/errors.js";
+import { errorBus } from "../shared/error-bus.js";
 import { HanaEngine } from "../core/engine.js";
 import { ensureFirstRun } from "../core/first-run.js";
 import { initDebugLog } from "../lib/debug-log.js";
+import { safeJson } from "./hono-helpers.js";
 
 // Pi SDK 的 fetch 请求会累积 AbortSignal listener，提高上限避免无害警告
 setMaxListeners(50);
 
 import { loadLocale } from "./i18n.js";
-import chatRoute from "./routes/chat.js";
-import sessionsRoute from "./routes/sessions.js";
-import modelsRoute from "./routes/models.js";
-import configRoute from "./routes/config.js";
-import uploadRoute from "./routes/upload.js";
-import providersRoute from "./routes/providers.js";
-import avatarRoute from "./routes/avatar.js";
-import agentsRoute from "./routes/agents.js";
-import deskRoute from "./routes/desk.js";
-import skillsRoute from "./routes/skills.js";
-import channelsRoute from "./routes/channels.js";
-import dmRoute from "./routes/dm.js";
-import fsRoute from "./routes/fs.js";
-import preferencesRoute from "./routes/preferences.js";
-import bridgeRoute from "./routes/bridge.js";
-import authRoute from "./routes/auth.js";
-import diaryRoute from "./routes/diary.js";
+import { createChatRoute } from "./routes/chat.js";
+import { createSessionsRoute } from "./routes/sessions.js";
+import { createModelsRoute } from "./routes/models.js";
+import { createConfigRoute } from "./routes/config.js";
+import { createUploadRoute } from "./routes/upload.js";
+import { createProvidersRoute } from "./routes/providers.js";
+import { createAvatarRoute } from "./routes/avatar.js";
+import { createAgentsRoute } from "./routes/agents.js";
+import { createDeskRoute } from "./routes/desk.js";
+import { createSkillsRoute } from "./routes/skills.js";
+import { createChannelsRoute } from "./routes/channels.js";
+import { createDmRoute } from "./routes/dm.js";
+import { createFsRoute } from "./routes/fs.js";
+import { createPreferencesRoute } from "./routes/preferences.js";
+import { createBridgeRoute } from "./routes/bridge.js";
+import { createAuthRoute } from "./routes/auth.js";
+import { createDiaryRoute } from "./routes/diary.js";
+import { createConfirmRoute } from "./routes/confirm.js";
+import { createPluginsRoute } from "./routes/plugins.js";
+import { createCheckpointsRoute } from "./routes/checkpoints.js";
+// internal-browser WS is handled directly via raw ws.WebSocketServer in the
+// upgrade handler below (WsTransport needs raw ws .on()/.off() methods)
+import { ConfirmStore } from "../lib/confirm-store.js";
+import { DeferredResultStore } from "../lib/deferred-result-store.js";
+import { createDeferredResultExtension } from "../lib/extensions/deferred-result-ext.js";
 import { BridgeManager } from "../lib/bridge/bridge-manager.js";
 import { Hub } from "../hub/index.js";
 import { startCLI } from "./cli.js";
+import { fromRoot } from "../shared/hana-root.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(__dirname, "..");
-const productDir = path.join(projectRoot, "lib");
+const productDir = fromRoot("lib");
 
 // 用户数据存放在 ~/.hanako/（打包后与产品代码分离）
 // 开发时可通过 HANA_HOME 环境变量隔离数据目录，如：HANA_HOME=~/.hanako-dev node server/index.js
@@ -65,7 +76,7 @@ const dlog = initDebugLog(path.join(hanakoHome, "logs"));
 // 读取版本号
 let appVersion = "?";
 try {
-  const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
+  const pkg = JSON.parse(fs.readFileSync(fromRoot("package.json"), "utf-8"));
   appVersion = pkg.version || "?";
 } catch {}
 
@@ -77,8 +88,9 @@ await engine.init((msg) => console.log(`[server] ${msg}`));
 console.log("[server] ② engine.init 完成");
 dlog.log("server", "engine initialized");
 
-// 注入 session 解析器给 BrowserManager（避免循环依赖）
+// 注入依赖给 BrowserManager（避免循环依赖）
 import { BrowserManager } from "../lib/browser/browser-manager.js";
+BrowserManager.setHanakoHome(engine.hanakoHome);
 BrowserManager.setSessionResolver(() => engine.currentSessionPath);
 
 if (engine.currentModel) {
@@ -96,15 +108,22 @@ dlog.header(appVersion, {
   model: engine.currentModel?.name || "(none)",
   agent: engine.agentName,
   agentId: engine.currentAgentId,
-  utilityModel: engine._resolveUtilityConfig?.()?.utility || "(none)",
+  utilityModel: (() => { try { return engine.resolveUtilityConfig?.()?.utility; } catch { return "(none)"; } })(),
   channelsDir: engine.channelsDir,
 });
 
 // ── 初始化 Hub（调度中枢，包装 engine） ──
 const hub = new Hub({ engine });
 
+// ── 初始化插件系统 ──
+await engine.initPlugins(hub.eventBus);
+
 // 启动 Hub 调度器（Scheduler + ChannelRouter）
 hub.initSchedulers();
+
+engine.cleanupCheckpoints().catch(err => {
+  console.warn("[checkpoint] startup cleanup failed:", err.message);
+});
 
 // 加载 i18n
 loadLocale(engine.config?.locale);
@@ -112,102 +131,246 @@ loadLocale(engine.config?.locale);
 // ── 启动令牌（阻止本机其他程序随意访问） ──
 const SERVER_TOKEN = process.env.HANA_TOKEN || crypto.randomBytes(16).toString("hex");
 
-// ── 创建 Fastify 实例 ──
-const app = Fastify({ logger: false });
+// ── 创建 Hono 实例 ──
+const app = new Hono();
+const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
 
-// CORS（默认仅允许 localhost，HANA_CORS_ORIGIN 可放宽）
+// CORS（默认仅允许 localhost，HANA_CORS_ORIGIN 可放宽）+ 鉴权
 const corsAllowedOrigin = process.env.HANA_CORS_ORIGIN;
-app.addHook("onRequest", (req, reply, done) => {
-  const origin = req.headers.origin || "";
+app.use("*", async (c, next) => {
+  const origin = c.req.header("origin") || "";
   const isAllowed = corsAllowedOrigin
     ? origin === corsAllowedOrigin
     : /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   if (origin && isAllowed) {
-    reply.header("Access-Control-Allow-Origin", origin);
+    c.header("Access-Control-Allow-Origin", origin);
   }
-  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") {
-    reply.code(204).send();
-    return;
-  }
+  c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (c.req.method === "OPTIONS") return c.text("", 204);
+
   // 验证 token（WebSocket 升级请求通过 URL 参数传 token，在 chat.js 中校验）
-  const token = req.headers.authorization?.replace("Bearer ", "")
-    || req.query?.token;
-  if (token !== SERVER_TOKEN) {
-    reply.code(403).send({ error: "forbidden" });
-    return;
-  }
-  done();
+  const token = c.req.header("authorization")?.replace("Bearer ", "")
+    || c.req.query("token");
+  if (token !== SERVER_TOKEN) return c.json({ error: "forbidden" }, 403);
+
+  await next();
 });
 
-// WebSocket 支持
-await app.register(websocket);
+// 全局错误处理
+app.onError((err, c) => {
+  const appErr = AppError.wrap(err);
+  errorBus.report(appErr, {
+    context: { method: c.req.method, url: c.req.url },
+  });
+  return c.json(
+    { error: { code: appErr.code, message: appErr.message, traceId: appErr.traceId } },
+    appErr.httpStatus
+  );
+});
+
+// ── 阻塞式确认存储 ──
+const confirmStore = new ConfirmStore();
+engine.setConfirmStore(confirmStore);
+
+// --- Deferred Result Store ---
+const deferredResultStore = new DeferredResultStore(
+  hub.eventBus,
+  path.join(hanakoHome, ".ephemeral", "deferred-tasks.json"),
+);
+engine.setDeferredResultStore(deferredResultStore);
+
+// Bus handlers for plugin access
+hub.eventBus.handle("deferred:register", ({ taskId, sessionPath, meta }) => {
+  const sp = sessionPath || engine.currentSessionPath;
+  if (!sp) return { ok: false, error: "no active session" };
+  deferredResultStore.defer(taskId, sp, meta);
+  return { ok: true, sessionPath: sp };
+});
+hub.eventBus.handle("deferred:resolve", ({ taskId, result }) => {
+  deferredResultStore.resolve(taskId, result);
+  return { ok: true };
+});
+hub.eventBus.handle("deferred:fail", ({ taskId, reason }) => {
+  deferredResultStore.fail(taskId, reason);
+  return { ok: true };
+});
+hub.eventBus.handle("deferred:query", ({ taskId }) => {
+  return deferredResultStore.query(taskId);
+});
+hub.eventBus.handle("deferred:list-pending", ({ sessionPath }) => {
+  return deferredResultStore.listPending(sessionPath);
+});
+hub.eventBus.handle("session:get-titles", async ({ paths }) => {
+  if (!Array.isArray(paths) || !paths.length) return { titles: {} };
+  const coord = engine._sessionCoord;
+  if (!coord?.getTitlesForPaths) return { titles: {} };
+  const titles = await coord.getTitlesForPaths(paths);
+  return { titles };
+});
+
+// Register Pi SDK extension factory
+engine.registerExtensionFactory(createDeferredResultExtension(deferredResultStore));
 
 // ── 外部平台接入管理器 ──
 const bridgeManager = new BridgeManager({ engine, hub });
 hub.bridgeManager = bridgeManager;
 
-// 注册路由
-app.register(chatRoute, { engine, hub });
-app.register(sessionsRoute, { engine });
-app.register(modelsRoute, { engine });
-app.register(configRoute, { engine });
-app.register(uploadRoute, { engine });
-app.register(providersRoute, { engine });
-app.register(avatarRoute, { engine });
-app.register(agentsRoute, { engine });
-app.register(deskRoute, { engine, hub });
-app.register(skillsRoute, { engine });
-app.register(channelsRoute, { engine, hub });
-app.register(dmRoute, { engine });
-app.register(fsRoute, { engine });
-app.register(preferencesRoute, { engine });
-app.register(bridgeRoute, { engine, bridgeManager });
-app.register(authRoute, { engine });
-app.register(diaryRoute, { engine });
+const { restRoute: chatRestRoute, wsRoute: chatWsRoute } = createChatRoute(engine, hub, { upgradeWebSocket });
+app.route("/api", chatRestRoute);
+app.route("", chatWsRoute);
+app.route("/api", createSessionsRoute(engine));
+app.route("/api", createModelsRoute(engine));
+app.route("/api", createConfigRoute(engine));
+app.route("/api", createUploadRoute(engine));
+app.route("/api", createProvidersRoute(engine));
+app.route("/api", createAvatarRoute(engine));
+app.route("/api", createAgentsRoute(engine));
+app.route("/api", createDeskRoute(engine, hub));
+app.route("/api", createSkillsRoute(engine));
+app.route("/api", createChannelsRoute(engine, hub));
+app.route("/api", createDmRoute(engine));
+app.route("/api", createFsRoute(engine));
+app.route("/api", createPreferencesRoute(engine));
+app.route("/api", createBridgeRoute(engine, bridgeManager));
+app.route("/api", createAuthRoute(engine));
+app.route("/api", createDiaryRoute(engine));
+app.route("/api", createConfirmRoute(confirmStore, engine));
+app.route("/api", createPluginsRoute(engine));
+app.route("/api", createCheckpointsRoute(engine));
+// internal-browser WS — see unified upgrade handler in server startup below
 
 // 健康检查 + 身份信息
-app.get("/api/health", async () => ({
-  status: "ok",
-  agent: engine.agentName,
-  user: engine.userName,
-  model: engine.currentModel?.name,
-}));
+app.get("/api/health", async (c) => {
+  // 检查自定义头像是否存在（避免前端 HEAD 请求 404）
+  const avatars = {};
+  for (const role of ['agent', 'user']) {
+    const dir = path.join(role === 'user' ? engine.userDir : engine.agentDir, 'avatars');
+    avatars[role] = false;
+    try {
+      const files = fs.readdirSync(dir);
+      avatars[role] = files.some(f => /\.(png|jpe?g|webp)$/i.test(f));
+    } catch {}
+  }
+  return c.json({
+    status: "ok",
+    agent: engine.agentName,
+    user: engine.userName,
+    model: engine.currentModel?.name,
+    avatars,
+  });
+});
 
 // 前端日志上报（desktop 端把错误 POST 到 server 写进持久化日志）
-app.post("/api/log", async (req) => {
-  const { level, module, message } = req.body || {};
-  if (!message) return { ok: false };
+app.post("/api/log", async (c) => {
+  const { level, module, message } = await safeJson(c);
+  if (!message) return c.json({ ok: false });
   if (level === "error") dlog.error(module || "desktop", message);
   else if (level === "warn") dlog.warn(module || "desktop", message);
   else dlog.log(module || "desktop", message);
-  return { ok: true };
+  return c.json({ ok: true });
 });
 
 // Plan Mode（只读探索模式）
-app.get("/api/plan-mode", async () => ({ enabled: engine.planMode }));
-app.post("/api/plan-mode", async (req) => {
-  const { enabled } = req.body || {};
+app.get("/api/plan-mode", async (c) => {
+  return c.json({ enabled: engine.planMode });
+});
+app.post("/api/plan-mode", async (c) => {
+  const { enabled } = await safeJson(c);
   engine.setPlanMode(!!enabled);
-  return { ok: true, enabled: engine.planMode };
+  return c.json({ ok: true, enabled: engine.planMode });
 });
 
 // 远程关闭（供 desktop 端复用 server 退出时调用，跨平台可靠的 graceful shutdown）
-app.post("/api/shutdown", async () => {
+app.post("/api/shutdown", async (c) => {
   console.log("[server] 收到 HTTP shutdown 请求，正在清理...");
   // 异步执行，先返回响应
   setTimeout(() => gracefulShutdown(), 100);
-  return { ok: true };
+  return c.json({ ok: true });
 });
 
 // ── 启动服务器 ──
 const port = parseInt(process.env.HANA_PORT) || 0; // 0 = OS 分配
 const host = "127.0.0.1";
 
+let server;
 try {
-  await app.listen({ port, host });
-  const address = app.server.address();
+  server = serve({ fetch: app.fetch, port, hostname: host });
+
+  // @hono/node-server 的 serve() 内部调用 server.listen()，
+  // port=0 时需等 listening 事件才能拿到实际端口
+  await new Promise((resolve) => {
+    if (server.listening) resolve();
+    else server.on("listening", resolve);
+  });
+
+  // ── Internal browser control WS (raw ws) ──
+  // WsTransport requires raw ws .on()/.off() event methods that Hono's WSContext
+  // doesn't expose, so we handle /internal/browser via a standalone WebSocketServer.
+  //
+  // To avoid both handlers firing on the same upgrade request (which would corrupt
+  // the socket), we pass injectWebSocket a proxy that filters out /internal/browser
+  // upgrades before they reach Hono's handler.
+  const browserWss = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+    if (url.pathname !== "/internal/browser") return; // let Hono handle it
+
+    const token = url.searchParams.get("token");
+    if (token !== SERVER_TOKEN) {
+      socket.destroy();
+      return;
+    }
+    browserWss.handleUpgrade(req, socket, head, (ws) => {
+      browserWss.emit("connection", ws, req);
+    });
+  });
+
+  browserWss.on("connection", (ws) => {
+    const bm = BrowserManager.instance();
+    bm.setWsTransport(ws);
+
+    // 调试：记录浏览器 WS 消息往返
+    const _bwsLog = (line) => { try { fs.appendFileSync(path.join(hanakoHome, "browser-ws.log"), `${new Date().toISOString()} ${line}\n`); } catch {} };
+    _bwsLog("browser WS connected");
+    const origSend = ws.send.bind(ws);
+    ws.send = function(data, ...args) {
+      try { const m = JSON.parse(data); _bwsLog(`→ cmd=${m.cmd || m.type} id=${m.id || "?"}`); } catch {}
+      return origSend(data, ...args);
+    };
+    ws.on("message", (data) => {
+      try { const m = JSON.parse(data); _bwsLog(`← type=${m.type} id=${m.id || "?"} error=${m.error || "none"}`); } catch {}
+    });
+
+    ws.on("close", () => {
+      if (bm._transport?._ws === ws) bm.setWsTransport(null);
+      console.log("[server] Electron browser control WS disconnected");
+    });
+    ws.on("error", (err) => {
+      console.error("[server] Electron browser control WS error:", err.message);
+      if (bm._transport?._ws === ws) bm.setWsTransport(null);
+    });
+    console.log("[server] Electron browser control WS connected");
+  });
+
+  // Inject Hono WS for chat and other WS routes, but skip /internal/browser
+  // to prevent double-handling the same upgrade request
+  injectWebSocket({
+    on(event, handler) {
+      if (event === "upgrade") {
+        server.on("upgrade", (req, socket, head) => {
+          const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+          if (url.pathname === "/internal/browser") return; // already handled above
+          handler(req, socket, head);
+        });
+      } else {
+        server.on(event, handler);
+      }
+    },
+  });
+
+  const address = server.address();
   const actualPort = address.port;
 
   console.log(`[server] Hanako Server 运行在 http://${host}:${actualPort}`);
@@ -216,7 +379,7 @@ try {
   // 写 server-info 文件，供 Electron 检测复用或外部工具查询
   const serverInfoPath = path.join(hanakoHome, "server-info.json");
   try {
-    fs.writeFileSync(serverInfoPath, JSON.stringify({ pid: process.pid, port: actualPort, token: SERVER_TOKEN }));
+    fs.writeFileSync(serverInfoPath, JSON.stringify({ pid: process.pid, port: actualPort, token: SERVER_TOKEN, version: appVersion }));
   } catch (e) {
     console.error("[server] 写入 server-info.json 失败:", e.message);
   }
@@ -225,17 +388,11 @@ try {
   bridgeManager.autoStart();
   dlog.log("server", "bridge autoStart done");
 
-  if (process.send) {
-    // Electron fork 模式：通知父进程
-    process.send({ type: "ready", port: actualPort, token: SERVER_TOKEN });
-    process.on("message", async (msg) => {
-      if (msg?.type === "shutdown") {
-        console.log("[server] 收到关闭信号，正在清理...");
-        await gracefulShutdown();
-      }
-    });
-  } else {
-    // 独立运行模式：启动 CLI
+  // 通知就绪（server-info.json 已在上方写入，无需额外动作）
+  console.log(`[server] ready: port=${actualPort}`);
+
+  // 独立运行模式：启动 CLI（TTY 环境下自动进入交互模式）
+  if (process.stdin.isTTY) {
     startCLI({
       port: actualPort,
       token: SERVER_TOKEN,
@@ -266,9 +423,9 @@ async function gracefulShutdown() {
 
   try {
     // 1. 先停止接受新请求
-    await app.close();
-    console.log("[server] Fastify 已关闭");
-    dlog.log("server", "Fastify closed");
+    server.close();
+    console.log("[server] HTTP server 已关闭");
+    dlog.log("server", "HTTP server closed");
 
     // 2. 挂起浏览器（保留冷保存，重启后可恢复卡片）
     try {
@@ -306,11 +463,28 @@ process.on("SIGTERM", gracefulShutdown);
 if (process.platform === "win32") process.on("SIGBREAK", gracefulShutdown);
 
 // 全局未捕获错误（写入持久化日志，防止崩溃无痕）
+let _stdoutBroken = false;
+function _safeConsoleError(...args) {
+  if (_stdoutBroken) return;
+  try {
+    console.error(...args);
+  } catch {
+    _stdoutBroken = true;
+  }
+}
+
 process.on("uncaughtException", (err) => {
+  if (err?.code === "EPIPE" || err?.code === "ERR_IPC_CHANNEL_CLOSED") {
+    if (!_stdoutBroken) {
+      _stdoutBroken = true;
+      dlog.error("server", `stdout pipe broken (${err.code}), suppressing further console output`);
+    }
+    return;
+  }
   dlog.error("server", `uncaughtException: ${err.message}`);
-  console.error("[server] uncaughtException:", err);
+  _safeConsoleError("[server] uncaughtException:", err);
 });
 process.on("unhandledRejection", (reason) => {
   dlog.error("server", `unhandledRejection: ${reason}`);
-  console.error("[server] unhandledRejection:", reason);
+  _safeConsoleError("[server] unhandledRejection:", reason);
 });

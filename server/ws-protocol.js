@@ -23,7 +23,7 @@
  *   { type: "jian_update", content: "..." }
  *   { type: "devlog", text: "...", level: "info"|"heartbeat"|"error" }
  *   { type: "activity_update", activity: { id, type, startedAt, finishedAt, summary, sessionFile, status } }
- *   { type: "file_output", filePath: "...", label: "...", ext: "pdf"|"docx"|"xlsx"|... }  (由 present_files 工具触发，每个文件一条)
+ *   { type: "file_output", filePath: "...", label: "...", ext: "pdf"|"docx"|"xlsx"|... }  (由 stage_files 工具触发，每个文件一条)
  *   { type: "artifact", artifactId: "...", artifactType: "html"|"code"|"markdown", title: "...", content: "...", language?: "..." }  (由 create_artifact 工具触发)
  *   { type: "browser_screenshot", base64: "...", mimeType: "image/jpeg" }  (由 browser 工具 screenshot 操作触发)
  *   { type: "browser_status", running: bool, url: "...", thumbnail?: "..." }  (浏览器状态变更，用于前端浮动卡片)
@@ -40,10 +40,11 @@ export function wsSend(ws, msg) {
   }
 }
 
-/** 安全地解析 WebSocket 消息 */
+/** 安全地解析 WebSocket 消息（兼容 Buffer / string / ArrayBuffer） */
 export function wsParse(data) {
   try {
-    return JSON.parse(data.toString());
+    const str = typeof data === "string" ? data : (data?.toString?.() ?? String(data));
+    return JSON.parse(str);
   } catch {
     return null;
   }

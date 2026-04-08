@@ -3,93 +3,24 @@
  */
 import fs from "fs/promises";
 import path from "path";
+import { Hono } from "hono";
+import { safeJson } from "../hono-helpers.js";
 import { t } from "../i18n.js";
 import { BrowserManager } from "../../lib/browser/browser-manager.js";
-import { isToolCallBlock, getToolArgs } from "../../core/llm-utils.js";
+import {
+  extractTextContent,
+  loadSessionHistoryMessages,
+  isValidSessionPath,
+} from "../../core/message-utils.js";
 
-/**
- * 从 Pi SDK 的 content 块数组中提取纯文本 + thinking + tool_use 调用
- * content 可能是 string 或 [{type: "text", text: "..."}, {type: "thinking", thinking: "..."}, ...]
- * 返回 { text, thinking, toolUses }
- */
-const TOOL_ARG_SUMMARY_KEYS = ["file_path", "path", "command", "pattern", "url", "query"];
-
-function extractTextContent(content) {
-  if (typeof content === "string") return { text: content, thinking: "", toolUses: [] };
-  if (!Array.isArray(content)) return { text: "", thinking: "", toolUses: [] };
-  const text = content
-    .filter(block => block.type === "text" && block.text)
-    .map(block => block.text)
-    .join("");
-  const thinking = content
-    .filter(block => block.type === "thinking" && block.thinking)
-    .map(block => block.thinking)
-    .join("\n");
-  const toolUses = content
-    .filter(isToolCallBlock)
-    .map(block => {
-      const args = {};
-      const params = getToolArgs(block);
-      if (params && typeof params === "object") {
-        for (const k of TOOL_ARG_SUMMARY_KEYS) {
-          if (params[k] !== undefined) args[k] = params[k];
-        }
-      }
-      return { name: block.name, args: Object.keys(args).length ? args : undefined };
-    });
-  return { text, thinking, toolUses };
-}
-
-/**
- * 优先从 session JSONL 读取完整历史。
- * engine.messages 可能只是当前上下文窗口，切回页面时会导致旧消息缺失。
- * 读文件失败时再退回内存态，避免历史接口直接空白。
- */
-async function loadSessionHistoryMessages(engine) {
-  const sessionPath = engine.currentSessionPath;
-  if (sessionPath) {
-    try {
-      const raw = await fs.readFile(sessionPath, "utf-8");
-      const messages = [];
-
-      for (const line of raw.split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          const entry = JSON.parse(line);
-          if (entry.type === "message" && entry.message) {
-            messages.push(entry.message);
-          }
-        } catch {
-          // 跳过损坏行
-        }
-      }
-
-      if (messages.length > 0) return messages;
-    } catch {
-      // 回退到内存态
-    }
-  }
-
-  return Array.isArray(engine.messages) ? engine.messages : [];
-}
-
-/**
- * 校验 sessionPath 是否在合法范围内，防止路径穿越
- * baseDir 可以是 sessionDir（单 agent）或 agentsDir（跨 agent）
- */
-function isValidSessionPath(sessionPath, baseDir) {
-  const resolved = path.resolve(sessionPath);
-  const base = path.resolve(baseDir);
-  return resolved.startsWith(base + path.sep) || resolved === base;
-}
-
-export default async function sessionsRoute(app, { engine }) {
+export function createSessionsRoute(engine) {
+  const route = new Hono();
 
   // 列出所有 agent 的历史 session
-  app.get("/api/sessions", async (req, reply) => {
+  route.get("/sessions", async (c) => {
     try {
       const sessions = await engine.listSessions();
-      return sessions.map(s => ({
+      return c.json(sessions.map(s => ({
         path: s.path,
         title: s.title || null,
         firstMessage: (s.firstMessage || "").slice(0, 100),
@@ -98,31 +29,43 @@ export default async function sessionsRoute(app, { engine }) {
         cwd: s.cwd || null,
         agentId: s.agentId || null,
         agentName: s.agentName || null,
-      }));
+        modelId: s.modelId || null,
+      })));
     } catch (err) {
-      reply.code(500);
-      return { error: err.message };
+      return c.json({ error: err.message }, 500);
     }
   });
 
-  // 获取当前 session 的消息
-  app.get("/api/sessions/messages", async (req, reply) => {
+  // 获取 session 的消息（支持 ?path= 指定 session，否则读焦点 session）
+  route.get("/sessions/messages", async (c) => {
     try {
-      const sourceMessages = await loadSessionHistoryMessages(engine);
+      const queryPath = c.req.query("path") || null;
+      if (queryPath && !isValidSessionPath(queryPath, engine.agentsDir)) {
+        return c.json({ error: "Invalid session path" }, 403);
+      }
+      const sourceMessages = await loadSessionHistoryMessages(engine, queryPath);
+
+      // 分页参数
+      const beforeId = c.req.query("before") != null ? Number(c.req.query("before")) : null;
+      const limit = Math.min(Number(c.req.query("limit")) || 50, 200);
 
       // 提取可显示的消息（user/assistant 文本 + 文件/artifact 工具结果）
-      const messages = [];
-      const fileOutputs = [];   // { afterIndex, files: [{ filePath, label, ext }] }
-      const artifacts = [];     // { afterIndex, artifactType, title, content, language }
+      // 每条消息带稳定 id（原始 sourceMessages 索引）
+      const allMessages = [];
+      const fileOutputs = [];
+      const artifacts = [];
+      const cards = [];
+      let globalIdx = 0;
 
       for (const m of sourceMessages) {
         if (m.role === "user") {
-          const { text } = extractTextContent(m.content);
-          if (text) messages.push({ role: "user", content: text });
+          const { text, images } = extractTextContent(m.content);
+          if (text || images.length) allMessages.push({ id: String(globalIdx++), role: "user", content: text, images: images.length ? images : undefined });
         } else if (m.role === "assistant") {
-          const { text, thinking, toolUses } = extractTextContent(m.content);
+          const { text, thinking, toolUses } = extractTextContent(m.content, { stripThink: true });
           if (text || toolUses.length) {
-            messages.push({
+            allMessages.push({
+              id: String(globalIdx++),
               role: "assistant",
               content: text,
               thinking: thinking || undefined,
@@ -131,11 +74,12 @@ export default async function sessionsRoute(app, { engine }) {
           }
         } else if (m.role === "toolResult") {
           const d = m.details || {};
-          if (m.toolName === "present_files" && d.files?.length) {
-            fileOutputs.push({ afterIndex: messages.length - 1, files: d.files });
+          // COMPAT(v0.78): present_files → stage_files, remove after v0.90
+          if ((m.toolName === "stage_files" || m.toolName === "present_files") && d.files?.length) {
+            fileOutputs.push({ afterIndex: allMessages.length - 1, files: d.files });
           } else if (m.toolName === "create_artifact" && d.content) {
             artifacts.push({
-              afterIndex: messages.length - 1,
+              afterIndex: allMessages.length - 1,
               artifactId: d.artifactId,
               artifactType: d.type,
               title: d.title,
@@ -143,10 +87,45 @@ export default async function sessionsRoute(app, { engine }) {
               language: d.language,
             });
           }
+          if (d.card && d.card.pluginId) {
+            cards.push({ afterIndex: allMessages.length - 1, card: d.card });
+          }
         }
       }
 
-      // 从历史中提取最新 todo 状态（倒序找最后一条 todo toolResult）
+      // 分页：before 参数指定游标，否则默认返回最后 limit 条
+      let messages;
+      let hasMore = false;
+      let slicedFileOutputs = fileOutputs;
+      let slicedArtifacts = artifacts;
+      let slicedCards = cards;
+
+      const total = allMessages.length;
+      // all=1 强制全量返回（流式恢复等特殊场景）
+      const forceAll = c.req.query("all") === "1";
+
+      if (forceAll) {
+        messages = allMessages;
+      } else {
+        const endIdx = (beforeId != null && beforeId > 0)
+          ? Math.min(beforeId, total)
+          : total;
+        const startIdx = Math.max(0, endIdx - limit);
+        messages = allMessages.slice(startIdx, endIdx);
+        hasMore = startIdx > 0;
+        // 重映射 afterIndex 到切片内偏移，过滤超出范围的
+        slicedFileOutputs = fileOutputs
+          .filter(fo => fo.afterIndex >= startIdx && fo.afterIndex < endIdx)
+          .map(fo => ({ ...fo, afterIndex: fo.afterIndex - startIdx }));
+        slicedArtifacts = artifacts
+          .filter(a => a.afterIndex >= startIdx && a.afterIndex < endIdx)
+          .map(a => ({ ...a, afterIndex: a.afterIndex - startIdx }));
+        slicedCards = cards
+          .filter(cd => cd.afterIndex >= startIdx && cd.afterIndex < endIdx)
+          .map(cd => ({ ...cd, afterIndex: cd.afterIndex - startIdx }));
+      }
+
+      // 从历史中提取最新 todo 状态
       let todos = null;
       for (let i = sourceMessages.length - 1; i >= 0; i--) {
         const m = sourceMessages[i];
@@ -156,17 +135,17 @@ export default async function sessionsRoute(app, { engine }) {
         }
       }
 
-      return { messages, todos, fileOutputs, artifacts };
+      return c.json({ messages, todos, fileOutputs: slicedFileOutputs, artifacts: slicedArtifacts, cards: slicedCards, hasMore });
     } catch (err) {
-      reply.code(500);
-      return { error: err.message };
+      return c.json({ error: err.message }, 500);
     }
   });
 
   // 新建 session（可选指定工作目录和 agentId）
-  app.post("/api/sessions/new", async (req, reply) => {
+  route.post("/sessions/new", async (c) => {
     try {
-      const { cwd, memoryEnabled, agentId } = req.body || {};
+      const body = await safeJson(c);
+      const { cwd, memoryEnabled, agentId } = body;
       const memFlag = memoryEnabled !== false; // 默认 true
       console.log("[sessions] 新建 session", {
         hasCwd: !!cwd,
@@ -183,7 +162,7 @@ export default async function sessionsRoute(app, { engine }) {
       } else {
         await engine.createSession(null, cwd || undefined, memFlag);
       }
-      engine.persistMemoryEnabled();
+      engine.persistSessionMeta();
 
       // 记住工作目录 + 更新历史
       if (cwd) {
@@ -196,31 +175,31 @@ export default async function sessionsRoute(app, { engine }) {
       }
 
       console.log("[sessions] session 创建完成");
-      return {
+      return c.json({
         ok: true,
         path: engine.currentSessionPath,
         cwd: engine.cwd,
         agentId: engine.currentAgentId,
         agentName: engine.agentName,
-      };
+        planMode: engine.planMode,
+        memoryModelUnavailableReason: engine.memoryModelUnavailableReason || null,
+      });
     } catch (err) {
-      reply.code(500);
-      return { error: err.message };
+      return c.json({ error: err.message }, 500);
     }
   });
 
   // 切换 session（支持跨 agent）
-  app.post("/api/sessions/switch", async (req, reply) => {
+  route.post("/sessions/switch", async (c) => {
     try {
-      const { path: sessionPath } = req.body || {};
+      const body = await safeJson(c);
+      const { path: sessionPath } = body;
       if (!sessionPath) {
-        reply.code(400);
-        return { error: t("error.missingParam", { param: "path" }) };
+        return c.json({ error: t("error.missingParam", { param: "path" }) }, 400);
       }
       // 校验路径在 agentsDir 范围内（支持跨 agent session）
       if (!isValidSessionPath(sessionPath, engine.agentsDir)) {
-        reply.code(403);
-        return { error: "Invalid session path" };
+        return c.json({ error: "Invalid session path" }, 403);
       }
       // 切换前挂起浏览器（保存当前 session 的浏览器状态）
       const bm = BrowserManager.instance();
@@ -232,42 +211,71 @@ export default async function sessionsRoute(app, { engine }) {
       // 恢复目标 session 的浏览器（若有）
       await bm.resumeForSession(sessionPath);
 
-      return {
+      return c.json({
         ok: true,
         messageCount: engine.messages.length,
         memoryEnabled: engine.memoryEnabled,
+        planMode: engine.planMode,
+        memoryModelUnavailableReason: engine.memoryModelUnavailableReason || null,
         cwd: engine.cwd,
         agentId: engine.currentAgentId,
         agentName: engine.agentName,
         browserRunning: bm.isRunning,
         browserUrl: bm.currentUrl || null,
-        isStreaming: engine.isStreaming,
-      };
+        isStreaming: engine.isSessionStreaming(engine.currentSessionPath),
+        currentModelId: (engine.activeSessionModel ?? engine.currentModel)?.id || null,
+        currentModelProvider: (engine.activeSessionModel ?? engine.currentModel)?.provider || null,
+      });
     } catch (err) {
-      reply.code(500);
-      return { error: err.message };
+      const errDetail = `${err.message}\n${err.stack || ""}`;
+      console.error("[sessions/switch] error:", errDetail);
+      try { require("fs").appendFileSync(require("path").join(engine.hanakoHome, "switch-error.log"), `${new Date().toISOString()}\n${errDetail}\n---\n`); } catch {}
+      return c.json({ error: err.message }, 500);
     }
   });
 
   // 获取所有有浏览器的 session
-  app.get("/api/browser/sessions", async () => {
+  route.get("/browser/sessions", async (c) => {
     const bm = BrowserManager.instance();
-    return bm.getBrowserSessions();
+    return c.json(bm.getBrowserSessions());
   });
 
   // 关闭指定 session 的浏览器
-  app.post("/api/browser/close-session", async (req) => {
-    const { sessionPath } = req.body || {};
-    if (!sessionPath) return { error: "missing sessionPath" };
+  route.post("/browser/close-session", async (c) => {
+    const body = await safeJson(c);
+    const { sessionPath } = body;
+    if (!sessionPath) return c.json({ error: "missing sessionPath" });
     const bm = BrowserManager.instance();
     await bm.closeBrowserForSession(sessionPath);
-    return { ok: true };
+    return c.json({ ok: true });
+  });
+
+  // 重命名 session
+  route.post("/sessions/rename", async (c) => {
+    try {
+      const body = await safeJson(c);
+      const { path: sessionPath, title } = body;
+      if (!sessionPath) {
+        return c.json({ error: t("error.missingParam", { param: "path" }) }, 400);
+      }
+      if (typeof title !== "string" || !title.trim()) {
+        return c.json({ error: t("error.missingParam", { param: "title" }) }, 400);
+      }
+      if (!isValidSessionPath(sessionPath, engine.agentsDir)) {
+        return c.json({ error: "Invalid session path" }, 403);
+      }
+      await engine.saveSessionTitle(sessionPath, title.trim());
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err.message }, 500);
+    }
   });
 
   // 清理过期归档 session
-  app.post("/api/sessions/cleanup", async (req, reply) => {
+  route.post("/sessions/cleanup", async (c) => {
     try {
-      const { maxAgeDays = 90 } = req.body || {};
+      const body = await safeJson(c);
+      const { maxAgeDays = 90 } = body;
       const cutoff = Date.now() - maxAgeDays * 86400000;
       let deleted = 0;
 
@@ -291,33 +299,30 @@ export default async function sessionsRoute(app, { engine }) {
         }
       }
 
-      return { ok: true, deleted, maxAgeDays };
+      return c.json({ ok: true, deleted, maxAgeDays });
     } catch (err) {
-      reply.code(500);
-      return { error: err.message };
+      return c.json({ error: err.message }, 500);
     }
   });
 
   // 归档 session（支持跨 agent）
-  app.post("/api/sessions/archive", async (req, reply) => {
+  route.post("/sessions/archive", async (c) => {
     try {
-      const { path: sessionPath } = req.body || {};
+      const body = await safeJson(c);
+      const { path: sessionPath } = body;
       if (!sessionPath) {
-        reply.code(400);
-        return { error: t("error.missingParam", { param: "path" }) };
+        return c.json({ error: t("error.missingParam", { param: "path" }) }, 400);
       }
       // 校验路径在 agentsDir 范围内
       if (!isValidSessionPath(sessionPath, engine.agentsDir)) {
-        reply.code(403);
-        return { error: "Invalid session path" };
+        return c.json({ error: "Invalid session path" }, 403);
       }
 
       // 确认文件存在
       try {
         await fs.access(sessionPath);
       } catch {
-        reply.code(404);
-        return { error: t("error.sessionNotFound") };
+        return c.json({ error: t("error.sessionNotFound") }, 404);
       }
 
       // 先从 engine 的 session map 中移除（如果正在后台跑会被 abort）
@@ -332,10 +337,11 @@ export default async function sessionsRoute(app, { engine }) {
       const destPath = path.join(archiveDir, fileName);
       await fs.rename(sessionPath, destPath);
 
-      return { ok: true };
+      return c.json({ ok: true });
     } catch (err) {
-      reply.code(500);
-      return { error: err.message };
+      return c.json({ error: err.message }, 500);
     }
   });
+
+  return route;
 }

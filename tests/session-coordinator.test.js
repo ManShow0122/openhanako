@@ -8,11 +8,14 @@ const { createAgentSessionMock, sessionManagerCreateMock } = vi.hoisted(() => ({
   sessionManagerCreateMock: vi.fn(),
 }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
+vi.mock("../lib/pi-sdk/index.js", () => ({
   createAgentSession: createAgentSessionMock,
   SessionManager: {
     create: sessionManagerCreateMock,
     open: vi.fn(),
+  },
+  SettingsManager: {
+    inMemory: vi.fn(() => ({})),
   },
 }));
 
@@ -52,6 +55,7 @@ describe("SessionCoordinator", () => {
       setMemoryEnabled: vi.fn((enabled) => {
         sessionMemoryEnabled = !!enabled;
       }),
+      buildSystemPrompt: () => sessionMemoryEnabled ? "MEMORY ON" : "MEMORY OFF",
     };
 
     const resourceLoader = {
@@ -143,7 +147,7 @@ describe("SessionCoordinator", () => {
       listAgents: () => [],
     });
 
-    const result = await coordinator.executeIsolated("delegate task", {
+    const result = await coordinator.executeIsolated("subagent task", {
       signal: controller.signal,
     });
 

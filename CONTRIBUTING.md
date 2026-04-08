@@ -1,6 +1,6 @@
 # Contributing to Hanako
 
-感谢你对 Hanako 的关注！欢迎提交 issue 和 pull request。
+感谢你对 Hanako 的关注！
 
 ## 开发环境
 
@@ -48,7 +48,7 @@ npx electron-rebuild -f -w better-sqlite3
 
 ## Pull Request
 
-项目目前处于早期阶段，**暂不接受 Pull Request**。如果你有想法或发现了问题，欢迎先开 issue 讨论。
+项目目前处于早期阶段，**不接受 Pull Request**。如果你有想法或发现了问题，欢迎开 issue 讨论。
 
 ## 报告问题
 
@@ -67,7 +67,7 @@ core/           # Engine 编排层 + Manager
 lib/            # 核心库（bridge、sandbox、memory、tools）
 server/         # Fastify HTTP + WebSocket 服务
 desktop/        # Electron 应用 + React 前端
-hub/            # Scheduler 后台任务
+hub/            # 后台任务（调度器、频道路由、Agent 通信、DM 路由）
 tests/          # Vitest 测试
 skills2set/     # Skills 定义
 ```
